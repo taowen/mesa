@@ -216,9 +216,8 @@ option(
                 'will be built'
 )
 
-# Note that currently turnip supports msm and kgsl, while the gallium driver
-# support msm and virtio.  This is a temporary situation with virtio support
-# for turnip and kgsl support for gallium planned/in-progress.
+# Turnip and gallium Freedreno both support msm and kgsl. Build Android /
+# KGSL-only with -Dfreedreno-kmds=kgsl (and optionally virtio).
 option(
   'freedreno-kmds',
   type : 'array',
