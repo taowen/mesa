@@ -488,9 +488,16 @@ if _platforms.contains('auto')
   endif
 endif
 
+with_ardesk_wsi = get_option('ardesk-wsi')
 with_platform_android = _platforms.contains('android')
 with_platform_x11 = _platforms.contains('x11')
 with_platform_wayland = _platforms.contains('wayland')
+if with_ardesk_wsi
+  if not with_platform_x11 or not with_platform_wayland or not freedreno_kmds.contains('kgsl')
+    error('ardesk-wsi requires x11,wayland platforms and the KGSL KMD')
+  endif
+  pre_args += '-DHAVE_ARDESK_WSI'
+endif
 with_platform_haiku = _platforms.contains('haiku')
 with_platform_windows = _platforms.contains('windows')
 with_platform_macos = _platforms.contains('macos')

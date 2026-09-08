@@ -46,6 +46,7 @@ extern uint64_t WSI_DEBUG;
 
 enum wsi_image_type {
    WSI_IMAGE_TYPE_CPU,
+   WSI_IMAGE_TYPE_ANDROID,
    WSI_IMAGE_TYPE_DRM,
    WSI_IMAGE_TYPE_DXGI,
    WSI_IMAGE_TYPE_METAL,
@@ -53,6 +54,11 @@ enum wsi_image_type {
 
 struct wsi_base_image_params {
    enum wsi_image_type image_type;
+};
+
+struct wsi_android_image_params {
+   struct wsi_base_image_params base;
+   bool buffer_blit;
 };
 
 struct wsi_cpu_image_params {

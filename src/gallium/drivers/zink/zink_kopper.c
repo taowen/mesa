@@ -51,8 +51,10 @@ zink_kopper_set_present_mode_for_interval(struct kopper_displaytarget *cdt, int 
       if (cdt->present_modes & BITFIELD_BIT(VK_PRESENT_MODE_IMMEDIATE_KHR) &&
           cdt->type != KOPPER_WAYLAND)
          cdt->present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
-      else
+      else if (cdt->present_modes & BITFIELD_BIT(VK_PRESENT_MODE_MAILBOX_KHR))
          cdt->present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
+      else
+         cdt->present_mode = VK_PRESENT_MODE_FIFO_KHR;
    } else if (interval > 0) {
       cdt->present_mode = VK_PRESENT_MODE_FIFO_KHR;
    }
@@ -86,20 +88,19 @@ init_dt_type(struct kopper_displaytarget *cdt)
 }
 
 static VkSurfaceKHR
-kopper_CreateSurface(struct zink_screen *screen, struct kopper_displaytarget *cdt)
+kopper_create_surface_handle(struct zink_screen *screen, const struct kopper_loader_info *info)
 {
    VkSurfaceKHR surface = VK_NULL_HANDLE;
    VkResult error = VK_SUCCESS;
 
-   init_dt_type(cdt);
-   VkStructureType type = cdt->info.bos.sType;
+   VkStructureType type = info->bos.sType;
    switch (type) {
 #ifdef VK_USE_PLATFORM_XCB_KHR
    case VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR: {
 #ifdef GLX_USE_APPLEGL
       error = VK_INCOMPLETE;
 #else
-      VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&cdt->info.bos;
+      VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&info->bos;
       error = VKSCR(CreateXcbSurfaceKHR)(screen->instance, xcb, NULL, &surface);
 #endif
       break;
@@ -107,14 +108,14 @@ kopper_CreateSurface(struct zink_screen *screen, struct kopper_displaytarget *cd
 #endif
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
    case VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR: {
-      VkWaylandSurfaceCreateInfoKHR *wlsci = (VkWaylandSurfaceCreateInfoKHR *)&cdt->info.bos;
+      VkWaylandSurfaceCreateInfoKHR *wlsci = (VkWaylandSurfaceCreateInfoKHR *)&info->bos;
       error = VKSCR(CreateWaylandSurfaceKHR)(screen->instance, wlsci, NULL, &surface);
       break;
    }
 #endif
 #ifdef VK_USE_PLATFORM_WIN32_KHR
    case VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR: {
-      VkWin32SurfaceCreateInfoKHR *win32 = (VkWin32SurfaceCreateInfoKHR *)&cdt->info.bos;
+      VkWin32SurfaceCreateInfoKHR *win32 = (VkWin32SurfaceCreateInfoKHR *)&info->bos;
       error = VKSCR(CreateWin32SurfaceKHR)(screen->instance, win32, NULL, &surface);
       break;
    }
@@ -125,6 +126,18 @@ kopper_CreateSurface(struct zink_screen *screen, struct kopper_displaytarget *cd
    if (error != VK_SUCCESS) {
       return VK_NULL_HANDLE;
    }
+
+   return surface;
+}
+
+static VkSurfaceKHR
+kopper_CreateSurface(struct zink_screen *screen, struct kopper_displaytarget *cdt)
+{
+   init_dt_type(cdt);
+   VkSurfaceKHR surface = kopper_create_surface_handle(screen, &cdt->info);
+   if (!surface)
+      return VK_NULL_HANDLE;
+   VkResult error;
 
    VkBool32 supported;
    error = VKSCR(GetPhysicalDeviceSurfaceSupportKHR)(screen->pdev, screen->gfx_queue, surface, &supported);
@@ -145,12 +158,77 @@ kopper_CreateSurface(struct zink_screen *screen, struct kopper_displaytarget *cd
          cdt->present_modes |= BITFIELD_BIT(modes[i]);
    }
 
+   count = 0;
+   error = VKSCR(GetPhysicalDeviceSurfaceFormatsKHR)(screen->pdev, surface, &count, NULL);
+   if (!zink_screen_handle_vkresult(screen, error) || !count)
+      goto fail;
+   VkSurfaceFormatKHR *formats = calloc(count, sizeof(*formats));
+   if (!formats)
+      goto fail;
+   error = VKSCR(GetPhysicalDeviceSurfaceFormatsKHR)(screen->pdev, surface, &count, formats);
+   bool found = false;
+   if (error == VK_SUCCESS) {
+      for (unsigned i = 0; i < count; i++) {
+         if (formats[i].format != cdt->formats[0] && formats[i].format != VK_FORMAT_UNDEFINED)
+            continue;
+         if (!found || (cdt->type == KOPPER_WAYLAND &&
+                        formats[i].colorSpace == VK_COLOR_SPACE_PASS_THROUGH_EXT))
+            cdt->color_space = formats[i].colorSpace;
+         found = true;
+      }
+   }
+   free(formats);
+   if (!found) {
+      mesa_loge("zink: surface has no supported colorspace for format %u", cdt->formats[0]);
+      goto fail;
+   }
+
    zink_kopper_set_present_mode_for_interval(cdt, cdt->info.initial_swap_interval);
 
    return surface;
 fail:
    VKSCR(DestroySurfaceKHR)(screen->instance, surface, NULL);
    return VK_NULL_HANDLE;
+}
+
+/* GLX/EGL config channel masks don't constrain the storage order of a native
+ * window's GPU buffer. Choose that order before DRI allocates its attachments,
+ * so resources, render-target views and readback all describe the same format.
+ * In particular, an Android HAL may support ordinary BGRA images but only
+ * expose RGBA swapchain surfaces backed by AHardwareBuffer. */
+enum pipe_format
+zink_kopper_choose_format(struct pipe_screen *pscreen,
+                         const struct kopper_loader_info *info,
+                         enum pipe_format format)
+{
+   struct zink_screen *screen = zink_screen(pscreen);
+   VkFormat preferred = zink_get_format(screen, util_format_linear(format));
+   if (preferred != VK_FORMAT_B8G8R8A8_UNORM && preferred != VK_FORMAT_R8G8B8A8_UNORM)
+      return format;
+   VkFormat alternate = preferred == VK_FORMAT_B8G8R8A8_UNORM ?
+      VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
+   VkSurfaceKHR surface = kopper_create_surface_handle(screen, info);
+   if (!surface)
+      return format;
+   uint32_t count = 0;
+   VkSurfaceFormatKHR *formats = NULL;
+   if (VKSCR(GetPhysicalDeviceSurfaceFormatsKHR)(screen->pdev, surface, &count, NULL) != VK_SUCCESS || !count)
+      goto out;
+   formats = calloc(count, sizeof(*formats));
+   if (!formats || VKSCR(GetPhysicalDeviceSurfaceFormatsKHR)(screen->pdev, surface, &count, formats) != VK_SUCCESS)
+      goto out;
+   bool has_alternate = false;
+   for (uint32_t i = 0; i < count; i++) {
+      if (formats[i].format == preferred || formats[i].format == VK_FORMAT_UNDEFINED)
+         goto out;
+      has_alternate |= formats[i].format == alternate;
+   }
+   if (has_alternate)
+      format = util_format_rgb_to_bgr(format);
+out:
+   free(formats);
+   VKSCR(DestroySurfaceKHR)(screen->instance, surface, NULL);
+   return format;
 }
 
 static void
@@ -282,10 +360,7 @@ kopper_CreateSwapchain(struct zink_screen *screen, struct kopper_displaytarget *
       cswap->scci.surface = cdt->surface;
       cswap->scci.flags = zink_kopper_has_srgb(cdt) ? VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR : 0;
       cswap->scci.imageFormat = cdt->formats[0];
-      if (cdt->type == KOPPER_WAYLAND)
-          cswap->scci.imageColorSpace = VK_COLOR_SPACE_PASS_THROUGH_EXT;
-      else
-          cswap->scci.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+      cswap->scci.imageColorSpace = cdt->color_space;
       // TODO: This is where you'd hook up stereo
       cswap->scci.imageArrayLayers = 1;
       cswap->scci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
@@ -301,6 +376,8 @@ kopper_CreateSwapchain(struct zink_screen *screen, struct kopper_displaytarget *
       cswap->scci.compositeAlpha = has_alpha && !cdt->info.present_opaque
                                    ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR
                                    : VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+      if (!(cswap->scci.compositeAlpha & cdt->caps.supportedCompositeAlpha))
+         cswap->scci.compositeAlpha = 1u << (ffs(cdt->caps.supportedCompositeAlpha) - 1);
       cswap->scci.clipped = VK_TRUE;
    }
    cswap->scci.presentMode = cdt->present_mode;
@@ -358,7 +435,12 @@ kopper_CreateSwapchain(struct zink_screen *screen, struct kopper_displaytarget *
                                    &cswap->swapchain);
    }
    if (error != VK_SUCCESS) {
-       mesa_loge("CreateSwapchainKHR failed with %s\n", vk_Result_to_str(error));
+       mesa_loge("CreateSwapchainKHR failed with %s (format=%u colorspace=%u usage=0x%x alpha=0x%x mode=%u flags=0x%x extent=%ux%u images=%u)",
+                 vk_Result_to_str(error), cswap->scci.imageFormat,
+                 cswap->scci.imageColorSpace, cswap->scci.imageUsage,
+                 cswap->scci.compositeAlpha, cswap->scci.presentMode,
+                 cswap->scci.flags, cswap->scci.imageExtent.width,
+                 cswap->scci.imageExtent.height, cswap->scci.minImageCount);
        free(cswap);
        *result = error;
        return NULL;

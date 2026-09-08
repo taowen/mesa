@@ -7,6 +7,12 @@
  * Copyright © 2015 Intel Corporation
  */
 
+#ifdef HAVE_ARDESK_WSI
+#define ARDESK_WSI true
+#else
+#define ARDESK_WSI false
+#endif
+
 #include "tu_device.h"
 
 #include "drm-uapi/drm_fourcc.h"
@@ -281,10 +287,10 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
 #ifdef TU_USE_WSI_PLATFORM
-      .KHR_present_id = true,
-      .KHR_present_id2 = true,
-      .KHR_present_wait = true,
-      .KHR_present_wait2 = true,
+      .KHR_present_id = !ARDESK_WSI,
+      .KHR_present_id2 = !ARDESK_WSI,
+      .KHR_present_wait = !ARDESK_WSI,
+      .KHR_present_wait2 = !ARDESK_WSI,
 #endif
       .KHR_push_descriptor = true,
       .KHR_ray_query = has_raytracing,
@@ -386,7 +392,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
 #ifdef TU_USE_WSI_PLATFORM
-      .EXT_present_timing = device->info->props.has_persistent_counter,
+      .EXT_present_timing = !ARDESK_WSI && device->info->props.has_persistent_counter,
 #endif
       .EXT_primitive_restart_index = true,
       .EXT_primitive_topology_list_restart = true,
@@ -430,7 +436,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .ARM_rasterization_order_attachment_access = true,
       .GOOGLE_decorate_string = true,
 #ifdef TU_USE_WSI_PLATFORM
-      .GOOGLE_display_timing = wsi_instance_supports_google_display_timing(&device->instance->vk, &device->instance->drirc.options),
+      .GOOGLE_display_timing = !ARDESK_WSI && wsi_instance_supports_google_display_timing(&device->instance->vk, &device->instance->drirc.options),
 #endif
       .GOOGLE_hlsl_functionality1 = true,
       .GOOGLE_user_type = true,
@@ -657,10 +663,10 @@ tu_get_features(struct tu_physical_device *pdevice,
 
 #ifdef TU_USE_WSI_PLATFORM
    /* VK_KHR_present_id */
-   features->presentId = true;
+   features->presentId = !ARDESK_WSI;
 
    /* VK_KHR_present_wait */
-   features->presentWait = true;
+   features->presentWait = !ARDESK_WSI;
 #endif
 
    /* VK_KHR_shader_clock */
@@ -899,10 +905,10 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->swapchainMaintenance1 = true;
 
    /* VK_KHR_present_id2 */
-   features->presentId2 = true;
+   features->presentId2 = !ARDESK_WSI;
 
    /* VK_KHR_present_wait2 */
-   features->presentWait2 = true;
+   features->presentWait2 = !ARDESK_WSI;
 #endif
 
    /* VK_EXT_texel_buffer_alignment */
@@ -957,9 +963,9 @@ tu_get_features(struct tu_physical_device *pdevice,
 
 #ifdef TU_USE_WSI_PLATFORM
    /* VK_EXT_present_timing */
-   features->presentTiming = true;
-   features->presentAtRelativeTime = true;
-   features->presentAtAbsoluteTime = true;
+   features->presentTiming = !ARDESK_WSI;
+   features->presentAtRelativeTime = !ARDESK_WSI;
+   features->presentAtAbsoluteTime = !ARDESK_WSI;
 #endif
 }
 
