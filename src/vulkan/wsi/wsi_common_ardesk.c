@@ -404,8 +404,11 @@ create_swapchain_for_layout(VkIcdSurfaceBase *surface, VkDevice device, struct w
       return create_swapchain_for_layout(surface, device, wsi, info, alloc, out, true);
    if (result != VK_SUCCESS) return result;
    if (info->imageExtent.width > properties.maxExtent.width ||
-       info->imageExtent.height > properties.maxExtent.height)
+       info->imageExtent.height > properties.maxExtent.height) {
+      if (!buffer_blit)
+         return create_swapchain_for_layout(surface, device, wsi, info, alloc, out, true);
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   }
    struct wsi_ardesk_chain *chain = vk_zalloc(alloc, sizeof(*chain), 8,
                                             VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!chain) return VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -520,6 +523,9 @@ wsi_GetPhysicalDeviceXcbPresentationSupportKHR(VkPhysicalDevice physical, uint32
                                               xcb_connection_t *connection, xcb_visualid_t visual)
 {
    VK_FROM_HANDLE(vk_physical_device, device, physical);
+   struct wsi_ardesk_formats formats;
+   if (wsi_ardesk_get_formats(device->wsi_device, &formats) != VK_SUCCESS || !formats.count)
+      return false;
    return queue < device->wsi_device->queue_family_count &&
           (device->wsi_device->queue_supports_blit & BITFIELD64_BIT(queue)) &&
           wsi_ardesk_x11_supported(connection, visual) && has_allocator(NULL);
@@ -536,6 +542,9 @@ wsi_GetPhysicalDeviceWaylandPresentationSupportKHR(VkPhysicalDevice physical, ui
                                                   struct wl_display *display)
 {
    VK_FROM_HANDLE(vk_physical_device, device, physical);
+   struct wsi_ardesk_formats formats;
+   if (wsi_ardesk_get_formats(device->wsi_device, &formats) != VK_SUCCESS || !formats.count)
+      return false;
    return queue < device->wsi_device->queue_family_count &&
           (device->wsi_device->queue_supports_blit & BITFIELD64_BIT(queue)) && has_allocator(display);
 }
