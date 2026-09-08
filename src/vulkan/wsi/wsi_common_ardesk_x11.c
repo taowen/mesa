@@ -146,8 +146,19 @@ wsi_ardesk_x11_drain(struct wsi_ardesk_chain *chain)
       }
       free(event);
    }
-   if (xcb_connection_has_error(chain->connection))
+   if (xcb_connection_has_error(chain->connection)) {
       chain->status = VK_ERROR_SURFACE_LOST_KHR;
+   } else if (chain->status == VK_SUCCESS) {
+      /* TAWC-DRI has configure/release events, but no window-destroy event.
+       * A live connection does not imply that its target window still exists.
+       * Check before acquire can hand out an image, including when the XCB
+       * special queue is empty or configure delivery has not caught up. */
+      VkExtent2D extent;
+      chain->status = wsi_ardesk_x11_extent(chain->connection, chain->window, &extent);
+      if (chain->status == VK_SUCCESS &&
+          (extent.width != chain->width || extent.height != chain->height))
+         chain->status = VK_ERROR_OUT_OF_DATE_KHR;
+   }
 }
 
 VkResult
