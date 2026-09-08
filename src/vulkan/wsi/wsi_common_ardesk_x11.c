@@ -5,11 +5,24 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 static xcb_extension_t tawc = { TAWC_DRI_NAME, 0 };
 /* Release events are broadcast to this client's selectors on a window, so
  * old/new swapchains must not independently restart their serials at one. */
 static atomic_uint next_serial;
+
+static void
+trace_buffer(const char *event, struct wsi_ardesk_chain *chain,
+             struct wsi_ardesk_image *image)
+{
+   const char *enabled = getenv("ARDESK_WSI_TRACE");
+   if (enabled && !strcmp(enabled, "1"))
+      fprintf(stderr, "X11_WSI event=%s window=%u serial=%u buffer=%p\n",
+              event, chain->window, image->serial, (void *)image);
+}
 
 static VkResult
 check(xcb_connection_t *connection, unsigned sequence)
@@ -118,8 +131,10 @@ wsi_ardesk_x11_drain(struct wsi_ardesk_chain *chain)
          uint32_t serial = ((tawc_dri_buffer_release_event *)event)->serial;
          for (unsigned i = 0; i < chain->base.image_count; i++) {
             struct wsi_ardesk_image *image = &chain->images[i];
-            if (image->state == ARDESK_PRESENTED && image->serial == serial)
+            if (image->state == ARDESK_PRESENTED && image->serial == serial) {
+               trace_buffer("release", chain, image);
                image->state = ARDESK_FREE;
+            }
          }
       }
       free(event);
@@ -168,6 +183,7 @@ wsi_ardesk_x11_present(struct wsi_ardesk_chain *chain, struct wsi_ardesk_image *
    if (result == VK_SUCCESS) {
       image->state = ARDESK_PRESENTED;
       image->serial = chain->serial;
+      trace_buffer("present", chain, image);
    }
    return result;
 }
