@@ -38,7 +38,7 @@ if with_ardesk_wsi
   files_vulkan_wsi += custom_target('ardesk-android-client-code',
     input : android_xml, output : 'wayland-android-protocol.c',
     command : [scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
-  files_vulkan_wsi += files('wsi_common_ardesk.c',
+  files_vulkan_wsi += files('wsi_common_ardesk.c', 'wsi_common_ardesk_formats.c',
     'wsi_common_ardesk_wayland.c', 'wsi_common_ardesk_x11.c')
 endif
 

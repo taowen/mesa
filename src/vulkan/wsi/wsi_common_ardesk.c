@@ -12,11 +12,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-static const VkFormat formats[] = {
-   VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM,
-   VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R8G8B8A8_SRGB,
-};
-
 static bool
 is_wayland(VkIcdSurfaceBase *surface)
 {
@@ -52,6 +47,10 @@ get_support(VkIcdSurfaceBase *surface, struct wsi_device *wsi, uint32_t queue,
             VkBool32 *supported)
 {
    *supported = false;
+   struct wsi_ardesk_formats formats;
+   VkResult result = wsi_ardesk_get_formats(wsi, &formats);
+   if (result != VK_SUCCESS) return result;
+   if (!formats.count) return VK_SUCCESS;
    if (queue >= wsi->queue_family_count || !(wsi->queue_supports_blit & BITFIELD64_BIT(queue)))
       return VK_SUCCESS;
    if (is_wayland(surface)) {
@@ -73,6 +72,10 @@ static VkResult
 get_capabilities(VkIcdSurfaceBase *surface, struct wsi_device *wsi,
                  const void *info_next, VkSurfaceCapabilities2KHR *caps)
 {
+   struct wsi_ardesk_formats supported;
+   VkResult result = wsi_ardesk_get_formats(wsi, &supported);
+   if (result != VK_SUCCESS) return result;
+   if (!supported.count) return VK_ERROR_SURFACE_LOST_KHR;
    VkExtent2D extent = { UINT32_MAX, UINT32_MAX };
    if (!is_wayland(surface)) {
       VkResult result = wsi_ardesk_x11_extent(x_connection(surface), x_window(surface), &extent);
@@ -82,14 +85,12 @@ get_capabilities(VkIcdSurfaceBase *surface, struct wsi_device *wsi,
       .minImageCount = 3, .maxImageCount = ARDESK_MAX_IMAGES,
       .currentExtent = extent,
       .minImageExtent = {1, 1},
-      .maxImageExtent = {wsi->maxImageDimension2D, wsi->maxImageDimension2D},
+      .maxImageExtent = supported.maximum,
       .maxImageArrayLayers = 1,
       .supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
       .currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
       .supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-      .supportedUsageFlags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
+      .supportedUsageFlags = supported.usage,
    };
    vk_foreach_struct(sType, ext, caps->pNext) {
       switch (sType) {
@@ -126,10 +127,13 @@ static VkResult
 get_formats(VkIcdSurfaceBase *surface, struct wsi_device *wsi,
             uint32_t *count, VkSurfaceFormatKHR *out_formats)
 {
+   struct wsi_ardesk_formats supported;
+   VkResult result = wsi_ardesk_get_formats(wsi, &supported);
+   if (result != VK_SUCCESS) return result;
    VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormatKHR, out, out_formats, count);
-   for (unsigned i = 0; i < ARRAY_SIZE(formats); i++) {
+   for (unsigned i = 0; i < supported.count; i++) {
       vk_outarray_append_typed(VkSurfaceFormatKHR, &out, f) {
-         *f = (VkSurfaceFormatKHR){formats[i], VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
+         *f = supported.formats[i];
       }
    }
    return vk_outarray_status(&out);
@@ -139,10 +143,13 @@ static VkResult
 get_formats2(VkIcdSurfaceBase *surface, struct wsi_device *wsi, const void *info_next,
              uint32_t *count, VkSurfaceFormat2KHR *out_formats)
 {
+   struct wsi_ardesk_formats supported;
+   VkResult result = wsi_ardesk_get_formats(wsi, &supported);
+   if (result != VK_SUCCESS) return result;
    VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormat2KHR, out, out_formats, count);
-   for (unsigned i = 0; i < ARRAY_SIZE(formats); i++) {
+   for (unsigned i = 0; i < supported.count; i++) {
       vk_outarray_append_typed(VkSurfaceFormat2KHR, &out, f) {
-         f->surfaceFormat = (VkSurfaceFormatKHR){formats[i], VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
+         f->surfaceFormat = supported.formats[i];
       }
    }
    return vk_outarray_status(&out);
@@ -382,17 +389,30 @@ create_swapchain_for_layout(VkIcdSurfaceBase *surface, VkDevice device, struct w
        info->imageColorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR ||
        (info->flags & VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR))
       return VK_ERROR_INITIALIZATION_FAILED;
+   struct wsi_ardesk_formats supported;
+   VkResult result = wsi_ardesk_get_formats(wsi, &supported);
+   if (result != VK_SUCCESS) return result;
    unsigned format;
-   for (format = 0; format < ARRAY_SIZE(formats); format++)
-      if (info->imageFormat == formats[format]) break;
-   if (format == ARRAY_SIZE(formats)) return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   for (format = 0; format < supported.count; format++)
+      if (info->imageFormat == supported.formats[format].format) break;
+   if (format == supported.count || (info->imageUsage & ~supported.usage))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   VkImageFormatProperties properties;
+   result = wsi_ardesk_image_properties(wsi, info->imageFormat, info->imageUsage,
+                                        buffer_blit, &properties);
+   if (result == VK_ERROR_FORMAT_NOT_SUPPORTED && !buffer_blit)
+      return create_swapchain_for_layout(surface, device, wsi, info, alloc, out, true);
+   if (result != VK_SUCCESS) return result;
+   if (info->imageExtent.width > properties.maxExtent.width ||
+       info->imageExtent.height > properties.maxExtent.height)
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
    struct wsi_ardesk_chain *chain = vk_zalloc(alloc, sizeof(*chain), 8,
                                             VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!chain) return VK_ERROR_OUT_OF_HOST_MEMORY;
    struct wsi_android_image_params params = {
       .base.image_type = WSI_IMAGE_TYPE_ANDROID, .buffer_blit = buffer_blit,
    };
-   VkResult result = wsi_swapchain_init(wsi, &chain->base, device, info, &params.base, alloc);
+   result = wsi_swapchain_init(wsi, &chain->base, device, info, &params.base, alloc);
    if (result != VK_SUCCESS) { vk_free(alloc, chain); return result; }
    if (mtx_init(&chain->lock, mtx_plain) != thrd_success) {
       wsi_swapchain_finish(&chain->base);

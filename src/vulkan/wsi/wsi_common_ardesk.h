@@ -12,6 +12,17 @@
 /* CPU access requests linear Qualcomm gralloc storage; no pixels cross the CPU. */
 #define ARDESK_BUFFER_USAGE 0x333u /* HW_RENDER | HW_TEXTURE | SW_READ/WRITE_OFTEN */
 
+struct wsi_ardesk_formats {
+   VkSurfaceFormatKHR formats[4];
+   uint32_t count;
+   VkImageUsageFlags usage;
+   VkExtent2D maximum;
+};
+VkResult wsi_ardesk_get_formats(struct wsi_device *, struct wsi_ardesk_formats *);
+VkResult wsi_ardesk_image_properties(struct wsi_device *, VkFormat,
+                                     VkImageUsageFlags, bool,
+                                     VkImageFormatProperties *);
+
 struct wsi_ardesk_chain;
 struct android_wlegl;
 
