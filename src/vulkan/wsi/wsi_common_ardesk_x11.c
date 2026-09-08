@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <stdatomic.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,15 +14,21 @@ static xcb_extension_t tawc = { TAWC_DRI_NAME, 0 };
 /* Release events are broadcast to this client's selectors on a window, so
  * old/new swapchains must not independently restart their serials at one. */
 static atomic_uint next_serial;
+static atomic_uint_fast64_t next_trace_id;
 
 static void
 trace_buffer(const char *event, struct wsi_ardesk_chain *chain,
              struct wsi_ardesk_image *image)
 {
    const char *enabled = getenv("ARDESK_WSI_TRACE");
-   if (enabled && !strcmp(enabled, "1"))
-      fprintf(stderr, "X11_WSI event=%s window=%u serial=%u buffer=%p\n",
-              event, chain->window, image->serial, (void *)image);
+   if (enabled && !strcmp(enabled, "1")) {
+      /* Allocator addresses can be reused after oldSwapchain destruction.
+       * Keep a stable allocation identity across all presents/releases. */
+      if (!image->trace_id)
+         image->trace_id = atomic_fetch_add(&next_trace_id, 1) + 1;
+      fprintf(stderr, "X11_WSI event=%s window=%u serial=%u buffer=0x%" PRIx64 "\n",
+              event, chain->window, image->serial, image->trace_id);
+   }
 }
 
 static VkResult

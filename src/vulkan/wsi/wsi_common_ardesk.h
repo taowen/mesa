@@ -23,6 +23,7 @@ struct wsi_ardesk_image {
    int32_t ints[ARDESK_MAX_INTS];
    unsigned num_fds, num_ints;
    uint32_t stride, format, serial;
+   uint64_t trace_id;
    enum { ARDESK_FREE, ARDESK_ACQUIRED, ARDESK_PRESENTED } state;
 };
 
