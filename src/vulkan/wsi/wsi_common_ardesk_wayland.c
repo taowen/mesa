@@ -13,6 +13,8 @@ global(void *data, struct wl_registry *registry, uint32_t name,
    struct wsi_ardesk_chain *chain = data;
    if (!chain->wlegl && version >= 2 && !strcmp(interface, "android_wlegl"))
       chain->wlegl = wl_registry_bind(registry, name, &android_wlegl_interface, 2);
+   if (!chain->owns_display && !chain->compositor && !strcmp(interface, "wl_compositor"))
+      chain->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 1);
 }
 
 static void
@@ -48,6 +50,8 @@ void
 wsi_ardesk_disconnect(struct wsi_ardesk_chain *chain)
 {
    if (chain->frame) wl_callback_destroy(chain->frame);
+   if (chain->opaque_region) wl_region_destroy(chain->opaque_region);
+   if (chain->compositor) wl_compositor_destroy(chain->compositor);
    if (chain->surface) wl_proxy_wrapper_destroy(chain->surface);
    if (chain->wlegl) android_wlegl_destroy(chain->wlegl);
    if (chain->registry) wl_registry_destroy(chain->registry);
@@ -211,6 +215,7 @@ wsi_ardesk_wayland_present(struct wsi_ardesk_chain *chain,
    if (!chain->frame) return VK_ERROR_OUT_OF_HOST_MEMORY;
    wl_callback_add_listener(chain->frame, &frame_listener, chain);
    image->state = ARDESK_PRESENTED;
+   wl_surface_set_opaque_region(chain->surface, chain->opaque_region);
    wl_surface_attach(chain->surface, image->buffer, 0, 0);
    /* damage uses logical surface coordinates; INT32_MAX also covers scaling. */
    wl_surface_damage(chain->surface, 0, 0, INT32_MAX, INT32_MAX);

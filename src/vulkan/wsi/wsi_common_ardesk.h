@@ -53,6 +53,8 @@ struct wsi_ardesk_chain {
    struct wl_event_queue *queue;
    struct wl_registry *registry;
    struct android_wlegl *wlegl;
+   struct wl_compositor *compositor;
+   struct wl_region *opaque_region;
    bool owns_display;
    struct wl_surface *surface; /* wrapper on the application's surface */
    struct wl_callback *frame;

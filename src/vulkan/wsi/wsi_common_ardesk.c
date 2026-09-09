@@ -386,6 +386,7 @@ create_swapchain_for_layout(VkIcdSurfaceBase *surface, VkDevice device, struct w
        info->imageExtent.width > wsi->maxImageDimension2D ||
        info->imageExtent.height > wsi->maxImageDimension2D ||
        info->presentMode != VK_PRESENT_MODE_FIFO_KHR ||
+       info->compositeAlpha != VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR ||
        info->imageColorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR ||
        (info->flags & VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR))
       return VK_ERROR_INITIALIZATION_FAILED;
@@ -445,6 +446,12 @@ create_swapchain_for_layout(VkIcdSurfaceBase *surface, VkDevice device, struct w
       chain->surface = wl_proxy_create_wrapper(((VkIcdSurfaceWayland *)surface)->surface);
       if (!chain->surface) { result = VK_ERROR_OUT_OF_HOST_MEMORY; goto fail; }
       wl_proxy_set_queue((struct wl_proxy *)chain->surface, chain->queue);
+      if (!chain->compositor) { result = VK_ERROR_SURFACE_LOST_KHR; goto fail; }
+      chain->opaque_region = wl_compositor_create_region(chain->compositor);
+      if (!chain->opaque_region) { result = VK_ERROR_OUT_OF_HOST_MEMORY; goto fail; }
+      /* Region coordinates are logical surface coordinates, independent of
+       * buffer scale or transform. The entire presented surface is opaque. */
+      wl_region_add(chain->opaque_region, 0, 0, INT32_MAX, INT32_MAX);
    } else {
       chain->connection = x_connection(surface);
       chain->window = x_window(surface);

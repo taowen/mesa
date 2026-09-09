@@ -68,13 +68,14 @@ wsi_ardesk_x11_supported(xcb_connection_t *connection, uint32_t visual)
    }
    const xcb_query_extension_reply_t *extension = xcb_get_extension_data(connection, &tawc);
    if (!compatible || !extension || !extension->present) return false;
-   tawc_dri_query_version_req body = { .major_version = 0, .minor_version = 3 };
+   tawc_dri_query_version_req body = { .major_version = 0, .minor_version = 4 };
    struct iovec parts[3] = { [2] = { &body, sizeof(body) } };
    xcb_protocol_request_t request = { 1, &tawc, X_TAWCDRI_QueryVersion, 0 };
    unsigned sequence = xcb_send_request(connection, XCB_REQUEST_CHECKED, parts + 2, &request);
    xcb_generic_error_t *error = NULL;
    tawc_dri_query_version_reply *reply = xcb_wait_for_reply(connection, sequence, &error);
-   bool supported = reply && !error && reply->major_version == 0 && reply->minor_version >= 3;
+   /* OPAQUE composition needs PresentBuffer2; old servers always blend alpha. */
+   bool supported = reply && !error && reply->major_version == 0 && reply->minor_version >= 4;
    free(reply);
    free(error);
    return supported;
@@ -176,11 +177,11 @@ wsi_ardesk_x11_present(struct wsi_ardesk_chain *chain, struct wsi_ardesk_image *
          collision |= chain->images[i].state == ARDESK_PRESENTED &&
                       chain->images[i].serial == chain->serial;
    } while (collision);
-   tawc_dri_present_buffer_req body = {
+   tawc_dri_present_buffer2_req body = { .base = {
       .window = chain->window, .num_fds = image->num_fds, .num_ints = image->num_ints,
       .width = chain->width, .height = chain->height, .stride = image->stride,
       .format = image->format, .usage_lo = ARDESK_BUFFER_USAGE, .serial = chain->serial,
-   };
+   }, .flags = TAWC_DRI_PRESENT_OPAQUE };
    int fds[ARDESK_MAX_FDS];
    for (unsigned i = 0; i < image->num_fds; i++) {
       fds[i] = dup(image->fds[i]);
@@ -193,7 +194,7 @@ wsi_ardesk_x11_present(struct wsi_ardesk_chain *chain, struct wsi_ardesk_image *
       [2] = { &body, sizeof(body) },
       [3] = { image->ints, image->num_ints * sizeof(int32_t) },
    };
-   xcb_protocol_request_t request = { 2, &tawc, X_TAWCDRI_PresentBuffer, 1 };
+   xcb_protocol_request_t request = { 2, &tawc, X_TAWCDRI_PresentBuffer2, 1 };
    /* XCB consumes the duplicate FDs even when sending fails. */
    unsigned sequence = xcb_send_request_with_fds(chain->connection, XCB_REQUEST_CHECKED,
                         parts + 2, &request, image->num_fds, fds);
