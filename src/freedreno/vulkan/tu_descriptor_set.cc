@@ -738,6 +738,16 @@ tu_descriptor_set_destroy(struct tu_device *device,
    vk_object_free(&device->vk, NULL, set);
 }
 
+static void
+tu_descriptor_pool_init_heap(struct tu_descriptor_pool *pool, uint64_t size)
+{
+   /* The offset reserves the allocator's null address; it is not additional
+    * BO capacity. Keep allocation direction identical after a pool reset.
+    */
+   util_vma_heap_init(&pool->bo_heap, TU_POOL_HEAP_OFFSET, size);
+   pool->bo_heap.alloc_high = false;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 tu_CreateDescriptorPool(VkDevice _device,
                         const VkDescriptorPoolCreateInfo *pCreateInfo,
@@ -819,11 +829,8 @@ tu_CreateDescriptorPool(VkDevice _device,
       pool->host_memory_ptr = pool->host_memory_base;
       pool->host_memory_end = (uint8_t*)pool + size;
    } else {
-      if (bo_size) {
-         util_vma_heap_init(&pool->bo_heap, TU_POOL_HEAP_OFFSET,
-                            bo_size + TU_POOL_HEAP_OFFSET);
-         pool->bo_heap.alloc_high = false;
-      }
+      if (bo_size)
+         tu_descriptor_pool_init_heap(pool, bo_size);
    }
 
    if (bo_size) {
@@ -917,8 +924,7 @@ tu_ResetDescriptorPool(VkDevice _device,
 
    if (!pool->host_memory_base && pool->size) {
       util_vma_heap_finish(&pool->bo_heap);
-      util_vma_heap_init(&pool->bo_heap, TU_POOL_HEAP_OFFSET,
-                         pool->size + TU_POOL_HEAP_OFFSET);
+      tu_descriptor_pool_init_heap(pool, pool->size);
    }
 
    pool->entry_count = 0;
