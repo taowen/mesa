@@ -916,5 +916,5 @@ option(
   description : 'Build panfrost Rust components.'
 )
 
-option('ardesk-wsi', type : 'boolean', value : false,
+option('arlinux-wsi', type : 'boolean', value : false,
        description : 'KGSL presentation through TAWC-DRI and android_wlegl')

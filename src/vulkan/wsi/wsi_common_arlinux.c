@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT
  * Turnip/KGSL WSI: shared Android buffers, with small X11/Wayland adapters.
  */
-#include "wsi_common_ardesk.h"
+#include "wsi_common_arlinux.h"
 #include "wsi_common_entrypoints.h"
 #include "vk_device.h"
 #include "vk_instance.h"
@@ -36,9 +36,9 @@ x_window(VkIcdSurfaceBase *surface)
 static bool
 has_allocator(struct wl_display *display)
 {
-   struct wsi_ardesk_chain chain = {0};
-   VkResult result = wsi_ardesk_connect(&chain, display);
-   wsi_ardesk_disconnect(&chain);
+   struct wsi_arlinux_chain chain = {0};
+   VkResult result = wsi_arlinux_connect(&chain, display);
+   wsi_arlinux_disconnect(&chain);
    return result == VK_SUCCESS;
 }
 
@@ -47,8 +47,8 @@ get_support(VkIcdSurfaceBase *surface, struct wsi_device *wsi, uint32_t queue,
             VkBool32 *supported)
 {
    *supported = false;
-   struct wsi_ardesk_formats formats;
-   VkResult result = wsi_ardesk_get_formats(wsi, &formats);
+   struct wsi_arlinux_formats formats;
+   VkResult result = wsi_arlinux_get_formats(wsi, &formats);
    if (result != VK_SUCCESS) return result;
    if (!formats.count) return VK_SUCCESS;
    if (queue >= wsi->queue_family_count || !(wsi->queue_supports_blit & BITFIELD64_BIT(queue)))
@@ -61,7 +61,7 @@ get_support(VkIcdSurfaceBase *surface, struct wsi_device *wsi, uint32_t queue,
       xcb_get_window_attributes_reply_t *attrs = xcb_get_window_attributes_reply(connection,
          xcb_get_window_attributes(connection, x_window(surface)), &error);
       if (attrs && !error)
-         *supported = wsi_ardesk_x11_supported(connection, attrs->visual) && has_allocator(NULL);
+         *supported = wsi_arlinux_x11_supported(connection, attrs->visual) && has_allocator(NULL);
       free(attrs);
       free(error);
    }
@@ -72,17 +72,17 @@ static VkResult
 get_capabilities(VkIcdSurfaceBase *surface, struct wsi_device *wsi,
                  const void *info_next, VkSurfaceCapabilities2KHR *caps)
 {
-   struct wsi_ardesk_formats supported;
-   VkResult result = wsi_ardesk_get_formats(wsi, &supported);
+   struct wsi_arlinux_formats supported;
+   VkResult result = wsi_arlinux_get_formats(wsi, &supported);
    if (result != VK_SUCCESS) return result;
    if (!supported.count) return VK_ERROR_SURFACE_LOST_KHR;
    VkExtent2D extent = { UINT32_MAX, UINT32_MAX };
    if (!is_wayland(surface)) {
-      VkResult result = wsi_ardesk_x11_extent(x_connection(surface), x_window(surface), &extent);
+      VkResult result = wsi_arlinux_x11_extent(x_connection(surface), x_window(surface), &extent);
       if (result != VK_SUCCESS) return result;
    }
    caps->surfaceCapabilities = (VkSurfaceCapabilitiesKHR) {
-      .minImageCount = 3, .maxImageCount = ARDESK_MAX_IMAGES,
+      .minImageCount = 3, .maxImageCount = ARLINUX_MAX_IMAGES,
       .currentExtent = extent,
       .minImageExtent = {1, 1},
       .maxImageExtent = supported.maximum,
@@ -127,8 +127,8 @@ static VkResult
 get_formats(VkIcdSurfaceBase *surface, struct wsi_device *wsi,
             uint32_t *count, VkSurfaceFormatKHR *out_formats)
 {
-   struct wsi_ardesk_formats supported;
-   VkResult result = wsi_ardesk_get_formats(wsi, &supported);
+   struct wsi_arlinux_formats supported;
+   VkResult result = wsi_arlinux_get_formats(wsi, &supported);
    if (result != VK_SUCCESS) return result;
    VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormatKHR, out, out_formats, count);
    for (unsigned i = 0; i < supported.count; i++) {
@@ -143,8 +143,8 @@ static VkResult
 get_formats2(VkIcdSurfaceBase *surface, struct wsi_device *wsi, const void *info_next,
              uint32_t *count, VkSurfaceFormat2KHR *out_formats)
 {
-   struct wsi_ardesk_formats supported;
-   VkResult result = wsi_ardesk_get_formats(wsi, &supported);
+   struct wsi_arlinux_formats supported;
+   VkResult result = wsi_arlinux_get_formats(wsi, &supported);
    if (result != VK_SUCCESS) return result;
    VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormat2KHR, out, out_formats, count);
    for (unsigned i = 0; i < supported.count; i++) {
@@ -181,13 +181,13 @@ get_rectangles(VkIcdSurfaceBase *surface, struct wsi_device *wsi,
 static struct wsi_image *
 get_image(struct wsi_swapchain *base, uint32_t index)
 {
-   return &((struct wsi_ardesk_chain *)base)->images[index].base;
+   return &((struct wsi_arlinux_chain *)base)->images[index].base;
 }
 
 static VkResult
 acquire(struct wsi_swapchain *base, const VkAcquireNextImageInfoKHR *info, uint32_t *index)
 {
-   struct wsi_ardesk_chain *chain = (void *)base;
+   struct wsi_arlinux_chain *chain = (void *)base;
    uint64_t start = os_time_get_nano();
    mtx_lock(&chain->lock);
    if (chain->retired) {
@@ -195,11 +195,11 @@ acquire(struct wsi_swapchain *base, const VkAcquireNextImageInfoKHR *info, uint3
       return VK_ERROR_OUT_OF_DATE_KHR;
    }
    for (;;) {
-      VkResult result = wsi_ardesk_dispatch(chain, 0);
+      VkResult result = wsi_arlinux_dispatch(chain, 0);
       if (result != VK_SUCCESS) break;
       for (unsigned i = 0; i < base->image_count; i++) {
-         if (chain->images[i].state == ARDESK_FREE) {
-            chain->images[i].state = ARDESK_ACQUIRED;
+         if (chain->images[i].state == ARLINUX_FREE) {
+            chain->images[i].state = ARLINUX_ACQUIRED;
             *index = i;
             mtx_unlock(&chain->lock);
             return VK_SUCCESS;
@@ -210,7 +210,7 @@ acquire(struct wsi_swapchain *base, const VkAcquireNextImageInfoKHR *info, uint3
          mtx_unlock(&chain->lock);
          return info->timeout ? VK_TIMEOUT : VK_NOT_READY;
       }
-      if (wsi_ardesk_dispatch(chain, info->timeout == UINT64_MAX ? UINT64_MAX :
+      if (wsi_arlinux_dispatch(chain, info->timeout == UINT64_MAX ? UINT64_MAX :
                              info->timeout - elapsed) != VK_SUCCESS) break;
       /* A presenting thread may need this same lock to submit an already
        * acquired image. Do not hold it for the entire acquire timeout. */
@@ -230,11 +230,11 @@ acquire(struct wsi_swapchain *base, const VkAcquireNextImageInfoKHR *info, uint3
 static VkResult
 release_images(struct wsi_swapchain *base, uint32_t count, const uint32_t *indices)
 {
-   struct wsi_ardesk_chain *chain = (void *)base;
+   struct wsi_arlinux_chain *chain = (void *)base;
    mtx_lock(&chain->lock);
    for (unsigned i = 0; i < count; i++) {
-      if (chain->images[indices[i]].state == ARDESK_ACQUIRED)
-         chain->images[indices[i]].state = ARDESK_FREE;
+      if (chain->images[indices[i]].state == ARLINUX_ACQUIRED)
+         chain->images[indices[i]].state = ARLINUX_FREE;
    }
    mtx_unlock(&chain->lock);
    return VK_SUCCESS;
@@ -244,7 +244,7 @@ static VkResult
 present(struct wsi_swapchain *base, uint32_t index, uint64_t present_id,
         const VkPresentRegionKHR *damage)
 {
-   struct wsi_ardesk_chain *chain = (void *)base;
+   struct wsi_arlinux_chain *chain = (void *)base;
    /* The two existing protocols carry release events, but no acquire fence.
     * Wait for Mesa's pre-present submit, which consumes the application's
     * semaphores. This is a GPU completion wait, never a pixel readback. */
@@ -253,8 +253,8 @@ present(struct wsi_swapchain *base, uint32_t index, uint64_t present_id,
    mtx_lock(&chain->lock);
    if (result == VK_SUCCESS) result = chain->status;
    if (result == VK_SUCCESS)
-      result = chain->connection ? wsi_ardesk_x11_present(chain, &chain->images[index]) :
-                                  wsi_ardesk_wayland_present(chain, &chain->images[index]);
+      result = chain->connection ? wsi_arlinux_x11_present(chain, &chain->images[index]) :
+                                  wsi_arlinux_wayland_present(chain, &chain->images[index]);
    if (result != VK_SUCCESS) chain->status = result;
    mtx_unlock(&chain->lock);
    return result;
@@ -263,13 +263,13 @@ present(struct wsi_swapchain *base, uint32_t index, uint64_t present_id,
 static VkResult
 destroy(struct wsi_swapchain *base, const VkAllocationCallbacks *alloc)
 {
-   struct wsi_ardesk_chain *chain = (void *)base;
-   wsi_ardesk_x11_finish(chain);
+   struct wsi_arlinux_chain *chain = (void *)base;
+   wsi_arlinux_x11_finish(chain);
    for (unsigned i = 0; i < base->image_count; i++) {
       wsi_destroy_image(base, &chain->images[i].base);
-      wsi_ardesk_free_buffer(&chain->images[i]);
+      wsi_arlinux_free_buffer(&chain->images[i]);
    }
-   wsi_ardesk_disconnect(chain);
+   wsi_arlinux_disconnect(chain);
    mtx_destroy(&chain->lock);
    wsi_swapchain_finish(base);
    vk_free(alloc, chain);
@@ -280,7 +280,7 @@ destroy(struct wsi_swapchain *base, const VkAllocationCallbacks *alloc)
  * A gralloc image can omit the extra rows needed by Turnip's image layout;
  * importing it as a transfer buffer instead preserves its actual row layout. */
 static VkResult
-import_memory(struct wsi_ardesk_chain *chain, struct wsi_ardesk_image *image,
+import_memory(struct wsi_arlinux_chain *chain, struct wsi_arlinux_image *image,
               const VkMemoryRequirements *reqs, VkImage vk_image, VkBuffer buffer,
               VkDeviceMemory *memory)
 {
@@ -318,7 +318,7 @@ import_memory(struct wsi_ardesk_chain *chain, struct wsi_ardesk_image *image,
 }
 
 static VkResult
-import_image(struct wsi_ardesk_chain *chain, struct wsi_ardesk_image *image)
+import_image(struct wsi_arlinux_chain *chain, struct wsi_arlinux_image *image)
 {
    struct wsi_swapchain *base = &chain->base;
    const struct wsi_device *wsi = base->wsi;
@@ -376,12 +376,12 @@ create_swapchain_for_layout(VkIcdSurfaceBase *surface, VkDevice device, struct w
 {
    if (info->oldSwapchain) {
       VK_FROM_HANDLE(wsi_swapchain, old_base, info->oldSwapchain);
-      struct wsi_ardesk_chain *old = (void *)old_base;
+      struct wsi_arlinux_chain *old = (void *)old_base;
       mtx_lock(&old->lock);
       old->retired = true;
       mtx_unlock(&old->lock);
    }
-   if (info->minImageCount > ARDESK_MAX_IMAGES || info->imageArrayLayers != 1 ||
+   if (info->minImageCount > ARLINUX_MAX_IMAGES || info->imageArrayLayers != 1 ||
        !info->imageExtent.width || !info->imageExtent.height ||
        info->imageExtent.width > wsi->maxImageDimension2D ||
        info->imageExtent.height > wsi->maxImageDimension2D ||
@@ -390,8 +390,8 @@ create_swapchain_for_layout(VkIcdSurfaceBase *surface, VkDevice device, struct w
        info->imageColorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR ||
        (info->flags & VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR))
       return VK_ERROR_INITIALIZATION_FAILED;
-   struct wsi_ardesk_formats supported;
-   VkResult result = wsi_ardesk_get_formats(wsi, &supported);
+   struct wsi_arlinux_formats supported;
+   VkResult result = wsi_arlinux_get_formats(wsi, &supported);
    if (result != VK_SUCCESS) return result;
    unsigned format;
    for (format = 0; format < supported.count; format++)
@@ -399,7 +399,7 @@ create_swapchain_for_layout(VkIcdSurfaceBase *surface, VkDevice device, struct w
    if (format == supported.count || (info->imageUsage & ~supported.usage))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
    VkImageFormatProperties properties;
-   result = wsi_ardesk_image_properties(wsi, info->imageFormat, info->imageUsage,
+   result = wsi_arlinux_image_properties(wsi, info->imageFormat, info->imageUsage,
                                         buffer_blit, &properties);
    if (result == VK_ERROR_FORMAT_NOT_SUPPORTED && !buffer_blit)
       return create_swapchain_for_layout(surface, device, wsi, info, alloc, out, true);
@@ -410,7 +410,7 @@ create_swapchain_for_layout(VkIcdSurfaceBase *surface, VkDevice device, struct w
          return create_swapchain_for_layout(surface, device, wsi, info, alloc, out, true);
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
    }
-   struct wsi_ardesk_chain *chain = vk_zalloc(alloc, sizeof(*chain), 8,
+   struct wsi_arlinux_chain *chain = vk_zalloc(alloc, sizeof(*chain), 8,
                                             VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!chain) return VK_ERROR_OUT_OF_HOST_MEMORY;
    struct wsi_android_image_params params = {
@@ -439,7 +439,7 @@ create_swapchain_for_layout(VkIcdSurfaceBase *surface, VkDevice device, struct w
       for (unsigned j = 0; j < WSI_ES_COUNT; j++)
          chain->images[i].base.explicit_sync[j].fd = -1;
    }
-   result = wsi_ardesk_connect(chain, is_wayland(surface) ?
+   result = wsi_arlinux_connect(chain, is_wayland(surface) ?
                               ((VkIcdSurfaceWayland *)surface)->display : NULL);
    if (result != VK_SUCCESS) goto fail;
    if (is_wayland(surface)) {
@@ -455,12 +455,12 @@ create_swapchain_for_layout(VkIcdSurfaceBase *surface, VkDevice device, struct w
    } else {
       chain->connection = x_connection(surface);
       chain->window = x_window(surface);
-      result = wsi_ardesk_x11_init(chain);
+      result = wsi_arlinux_x11_init(chain);
       if (result != VK_SUCCESS) goto fail;
    }
    for (unsigned i = 0; i < chain->base.image_count; i++) {
-      struct wsi_ardesk_image *image = &chain->images[i];
-      result = wsi_ardesk_alloc_buffer(chain, image);
+      struct wsi_arlinux_image *image = &chain->images[i];
+      result = wsi_arlinux_alloc_buffer(chain, image);
       if (result != VK_SUCCESS) goto fail;
       if (!i) {
          chain->layout.rowPitch = image->stride * 4;
@@ -530,12 +530,12 @@ wsi_GetPhysicalDeviceXcbPresentationSupportKHR(VkPhysicalDevice physical, uint32
                                               xcb_connection_t *connection, xcb_visualid_t visual)
 {
    VK_FROM_HANDLE(vk_physical_device, device, physical);
-   struct wsi_ardesk_formats formats;
-   if (wsi_ardesk_get_formats(device->wsi_device, &formats) != VK_SUCCESS || !formats.count)
+   struct wsi_arlinux_formats formats;
+   if (wsi_arlinux_get_formats(device->wsi_device, &formats) != VK_SUCCESS || !formats.count)
       return false;
    return queue < device->wsi_device->queue_family_count &&
           (device->wsi_device->queue_supports_blit & BITFIELD64_BIT(queue)) &&
-          wsi_ardesk_x11_supported(connection, visual) && has_allocator(NULL);
+          wsi_arlinux_x11_supported(connection, visual) && has_allocator(NULL);
 }
 VKAPI_ATTR VkBool32 VKAPI_CALL
 wsi_GetPhysicalDeviceXlibPresentationSupportKHR(VkPhysicalDevice physical, uint32_t queue,
@@ -549,8 +549,8 @@ wsi_GetPhysicalDeviceWaylandPresentationSupportKHR(VkPhysicalDevice physical, ui
                                                   struct wl_display *display)
 {
    VK_FROM_HANDLE(vk_physical_device, device, physical);
-   struct wsi_ardesk_formats formats;
-   if (wsi_ardesk_get_formats(device->wsi_device, &formats) != VK_SUCCESS || !formats.count)
+   struct wsi_arlinux_formats formats;
+   if (wsi_arlinux_get_formats(device->wsi_device, &formats) != VK_SUCCESS || !formats.count)
       return false;
    return queue < device->wsi_device->queue_family_count &&
           (device->wsi_device->queue_supports_blit & BITFIELD64_BIT(queue)) && has_allocator(display);

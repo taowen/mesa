@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-#include "wsi_common_ardesk.h"
+#include "wsi_common_arlinux.h"
 #include "vk_physical_device.h"
 
 static const VkFormat candidates[] = {
@@ -11,7 +11,7 @@ static const VkFormat candidates[] = {
  * copy path imports a transfer-destination DMA-BUF buffer and renders into
  * an ordinary optimal image; that image must also support transfer source. */
 VkResult
-wsi_ardesk_image_properties(struct wsi_device *wsi, VkFormat format,
+wsi_arlinux_image_properties(struct wsi_device *wsi, VkFormat format,
                            VkImageUsageFlags usage, bool buffer_blit,
                            VkImageFormatProperties *properties)
 {
@@ -73,16 +73,16 @@ static VkResult
 format_properties(struct wsi_device *wsi, VkFormat format, VkImageUsageFlags usage,
                   VkImageFormatProperties *properties)
 {
-   VkResult result = wsi_ardesk_image_properties(wsi, format, usage, false, properties);
+   VkResult result = wsi_arlinux_image_properties(wsi, format, usage, false, properties);
    if (result == VK_ERROR_FORMAT_NOT_SUPPORTED)
-      result = wsi_ardesk_image_properties(wsi, format, usage, true, properties);
+      result = wsi_arlinux_image_properties(wsi, format, usage, true, properties);
    return result;
 }
 
 VkResult
-wsi_ardesk_get_formats(struct wsi_device *wsi, struct wsi_ardesk_formats *supported)
+wsi_arlinux_get_formats(struct wsi_device *wsi, struct wsi_arlinux_formats *supported)
 {
-   *supported = (struct wsi_ardesk_formats) {
+   *supported = (struct wsi_arlinux_formats) {
       .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
       .maximum = {wsi->maxImageDimension2D, wsi->maxImageDimension2D},
    };

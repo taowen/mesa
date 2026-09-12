@@ -9,13 +9,13 @@ if dep_libdrm.found()
   files_vulkan_wsi += files('wsi_common_drm.c')
 endif
 
-if with_platform_x11 and not with_ardesk_wsi
+if with_platform_x11 and not with_arlinux_wsi
   files_vulkan_wsi += files('wsi_common_x11.c')
   links_vulkan_wsi += libloader_x11
   links_vulkan_wsi += libloader
 endif
 
-if with_platform_wayland and not with_ardesk_wsi
+if with_platform_wayland and not with_arlinux_wsi
   files_vulkan_wsi += files('wsi_common_wayland.c')
   files_vulkan_wsi += wp_files['fifo-v1']
   files_vulkan_wsi += wp_files['commit-timing-v1']
@@ -27,19 +27,19 @@ if with_platform_wayland and not with_ardesk_wsi
   files_vulkan_wsi += wp_files['color-management-v1']
 endif
 
-if with_ardesk_wsi
+if with_arlinux_wsi
   scanner = find_program('wayland-scanner', native : true)
-  ardesk_protocols = dependency('ardesk-wsi-protocols', version : '>=0.3')
-  platform_deps += ardesk_protocols
-  android_xml = ardesk_protocols.get_variable('pkgdatadir') / 'wayland-android.xml'
-  files_vulkan_wsi += custom_target('ardesk-android-client-header',
+  arlinux_protocols = dependency('arlinux-wsi-protocols', version : '>=0.3')
+  platform_deps += arlinux_protocols
+  android_xml = arlinux_protocols.get_variable('pkgdatadir') / 'wayland-android.xml'
+  files_vulkan_wsi += custom_target('arlinux-android-client-header',
     input : android_xml, output : 'wayland-android-client-protocol.h',
     command : [scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
-  files_vulkan_wsi += custom_target('ardesk-android-client-code',
+  files_vulkan_wsi += custom_target('arlinux-android-client-code',
     input : android_xml, output : 'wayland-android-protocol.c',
     command : [scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
-  files_vulkan_wsi += files('wsi_common_ardesk.c', 'wsi_common_ardesk_formats.c',
-    'wsi_common_ardesk_wayland.c', 'wsi_common_ardesk_x11.c')
+  files_vulkan_wsi += files('wsi_common_arlinux.c', 'wsi_common_arlinux_formats.c',
+    'wsi_common_arlinux_wayland.c', 'wsi_common_arlinux_x11.c')
 endif
 
 if with_platform_windows

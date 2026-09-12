@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#include "wsi_common_ardesk.h"
-#include <ardesk/tawc-dri.h>
+#include "wsi_common_arlinux.h"
+#include <arlinux/tawc-dri.h>
 #include <xcb/xcbext.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -17,10 +17,10 @@ static atomic_uint next_serial;
 static atomic_uint_fast64_t next_trace_id;
 
 static void
-trace_buffer(const char *event, struct wsi_ardesk_chain *chain,
-             struct wsi_ardesk_image *image)
+trace_buffer(const char *event, struct wsi_arlinux_chain *chain,
+             struct wsi_arlinux_image *image)
 {
-   const char *enabled = getenv("ARDESK_WSI_TRACE");
+   const char *enabled = getenv("ARLINUX_WSI_TRACE");
    if (enabled && !strcmp(enabled, "1")) {
       /* Allocator addresses can be reused after oldSwapchain destruction.
        * Keep a stable allocation identity across all presents/releases. */
@@ -44,7 +44,7 @@ check(xcb_connection_t *connection, unsigned sequence)
 }
 
 bool
-wsi_ardesk_x11_supported(xcb_connection_t *connection, uint32_t visual)
+wsi_arlinux_x11_supported(xcb_connection_t *connection, uint32_t visual)
 {
    if (!connection || xcb_connection_has_error(connection)) return false;
    struct sockaddr_storage peer;
@@ -82,7 +82,7 @@ wsi_ardesk_x11_supported(xcb_connection_t *connection, uint32_t visual)
 }
 
 VkResult
-wsi_ardesk_x11_extent(xcb_connection_t *connection, uint32_t window, VkExtent2D *extent)
+wsi_arlinux_x11_extent(xcb_connection_t *connection, uint32_t window, VkExtent2D *extent)
 {
    xcb_generic_error_t *error = NULL;
    xcb_get_geometry_reply_t *reply = xcb_get_geometry_reply(connection,
@@ -95,7 +95,7 @@ wsi_ardesk_x11_extent(xcb_connection_t *connection, uint32_t window, VkExtent2D 
 }
 
 static VkResult
-select_input(struct wsi_ardesk_chain *chain, uint32_t mask)
+select_input(struct wsi_arlinux_chain *chain, uint32_t mask)
 {
    tawc_dri_select_input_req body = {
       .eid = chain->eid, .window = chain->window, .event_mask = mask,
@@ -107,7 +107,7 @@ select_input(struct wsi_ardesk_chain *chain, uint32_t mask)
 }
 
 VkResult
-wsi_ardesk_x11_init(struct wsi_ardesk_chain *chain)
+wsi_arlinux_x11_init(struct wsi_arlinux_chain *chain)
 {
    chain->eid = xcb_generate_id(chain->connection);
    chain->events = xcb_register_for_special_xge(chain->connection, &tawc, chain->eid, NULL);
@@ -117,7 +117,7 @@ wsi_ardesk_x11_init(struct wsi_ardesk_chain *chain)
 }
 
 void
-wsi_ardesk_x11_finish(struct wsi_ardesk_chain *chain)
+wsi_arlinux_x11_finish(struct wsi_arlinux_chain *chain)
 {
    if (chain->events) {
       select_input(chain, 0);
@@ -126,7 +126,7 @@ wsi_ardesk_x11_finish(struct wsi_ardesk_chain *chain)
 }
 
 void
-wsi_ardesk_x11_drain(struct wsi_ardesk_chain *chain)
+wsi_arlinux_x11_drain(struct wsi_arlinux_chain *chain)
 {
    xcb_generic_event_t *event;
    while ((event = xcb_poll_for_special_event(chain->connection, chain->events))) {
@@ -138,10 +138,10 @@ wsi_ardesk_x11_drain(struct wsi_ardesk_chain *chain)
       } else if (ge->event_type == TAWC_DRI_EVENT_BUFFER_RELEASE) {
          uint32_t serial = ((tawc_dri_buffer_release_event *)event)->serial;
          for (unsigned i = 0; i < chain->base.image_count; i++) {
-            struct wsi_ardesk_image *image = &chain->images[i];
-            if (image->state == ARDESK_PRESENTED && image->serial == serial) {
+            struct wsi_arlinux_image *image = &chain->images[i];
+            if (image->state == ARLINUX_PRESENTED && image->serial == serial) {
                trace_buffer("release", chain, image);
-               image->state = ARDESK_FREE;
+               image->state = ARLINUX_FREE;
             }
          }
       }
@@ -155,7 +155,7 @@ wsi_ardesk_x11_drain(struct wsi_ardesk_chain *chain)
        * Check before acquire can hand out an image, including when the XCB
        * special queue is empty or configure delivery has not caught up. */
       VkExtent2D extent;
-      chain->status = wsi_ardesk_x11_extent(chain->connection, chain->window, &extent);
+      chain->status = wsi_arlinux_x11_extent(chain->connection, chain->window, &extent);
       if (chain->status == VK_SUCCESS &&
           (extent.width != chain->width || extent.height != chain->height))
          chain->status = VK_ERROR_OUT_OF_DATE_KHR;
@@ -163,9 +163,9 @@ wsi_ardesk_x11_drain(struct wsi_ardesk_chain *chain)
 }
 
 VkResult
-wsi_ardesk_x11_present(struct wsi_ardesk_chain *chain, struct wsi_ardesk_image *image)
+wsi_arlinux_x11_present(struct wsi_arlinux_chain *chain, struct wsi_arlinux_image *image)
 {
-   wsi_ardesk_x11_drain(chain);
+   wsi_arlinux_x11_drain(chain);
    if (chain->status != VK_SUCCESS) return chain->status;
    /* A serial is unique among all outstanding buffers, including wraparound. */
    bool collision = true;
@@ -174,15 +174,15 @@ wsi_ardesk_x11_present(struct wsi_ardesk_chain *chain, struct wsi_ardesk_image *
       if (!chain->serial) continue;
       collision = false;
       for (unsigned i = 0; i < chain->base.image_count; i++)
-         collision |= chain->images[i].state == ARDESK_PRESENTED &&
+         collision |= chain->images[i].state == ARLINUX_PRESENTED &&
                       chain->images[i].serial == chain->serial;
    } while (collision);
    tawc_dri_present_buffer2_req body = { .base = {
       .window = chain->window, .num_fds = image->num_fds, .num_ints = image->num_ints,
       .width = chain->width, .height = chain->height, .stride = image->stride,
-      .format = image->format, .usage_lo = ARDESK_BUFFER_USAGE, .serial = chain->serial,
+      .format = image->format, .usage_lo = ARLINUX_BUFFER_USAGE, .serial = chain->serial,
    }, .flags = TAWC_DRI_PRESENT_OPAQUE };
-   int fds[ARDESK_MAX_FDS];
+   int fds[ARLINUX_MAX_FDS];
    for (unsigned i = 0; i < image->num_fds; i++) {
       fds[i] = dup(image->fds[i]);
       if (fds[i] < 0) {
@@ -200,7 +200,7 @@ wsi_ardesk_x11_present(struct wsi_ardesk_chain *chain, struct wsi_ardesk_image *
                         parts + 2, &request, image->num_fds, fds);
    VkResult result = check(chain->connection, sequence);
    if (result == VK_SUCCESS) {
-      image->state = ARDESK_PRESENTED;
+      image->state = ARLINUX_PRESENTED;
       image->serial = chain->serial;
       trace_buffer("present", chain, image);
    }
