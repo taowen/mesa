@@ -86,35 +86,32 @@ wsi_arlinux_get_formats(struct wsi_device *wsi, struct wsi_arlinux_formats *supp
       .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
       .maximum = {wsi->maxImageDimension2D, wsi->maxImageDimension2D},
    };
+   const VkImageUsageFlags optional[] = {
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
+      VK_IMAGE_USAGE_STORAGE_BIT,
+   };
    for (unsigned i = 0; i < ARRAY_SIZE(candidates); i++) {
+      VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
       VkImageFormatProperties properties;
-      VkResult result = format_properties(wsi, candidates[i], supported->usage, &properties);
+      VkResult result = format_properties(wsi, candidates[i], usage, &properties);
       if (result == VK_ERROR_FORMAT_NOT_SUPPORTED) continue;
       if (result != VK_SUCCESS) return result;
       supported->formats[supported->count++] =
          (VkSurfaceFormatKHR){candidates[i], VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
-   }
-   if (!supported->count) return VK_SUCCESS;
-   const VkImageUsageFlags optional[] = {
-      VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-      VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
-   };
-   for (unsigned bit = 0; bit < ARRAY_SIZE(optional); bit++) {
-      bool all = true;
-      for (unsigned i = 0; i < supported->count; i++) {
-         VkImageFormatProperties properties;
-         VkResult result = format_properties(wsi, supported->formats[i].format,
-                                              supported->usage | optional[bit], &properties);
-         if (result == VK_ERROR_FORMAT_NOT_SUPPORTED) { all = false; break; }
+      for (unsigned bit = 0; bit < ARRAY_SIZE(optional); bit++) {
+         VkImageFormatProperties additional;
+         result = format_properties(wsi, candidates[i], usage | optional[bit], &additional);
+         if (result == VK_ERROR_FORMAT_NOT_SUPPORTED) continue;
          if (result != VK_SUCCESS) return result;
+         usage |= optional[bit];
+         properties = additional;
       }
-      if (all) supported->usage |= optional[bit];
-   }
-   for (unsigned i = 0; i < supported->count; i++) {
-      VkImageFormatProperties properties;
-      VkResult result = format_properties(wsi, supported->formats[i].format,
-                                           supported->usage, &properties);
-      if (result != VK_SUCCESS) return result;
+      /* Surface usages are not an intersection of all surface formats: UNORM
+       * can support storage images even when its sRGB counterpart cannot.
+       * Creation still validates the selected format and complete usage mask
+       * against the actual imported-image or buffer-copy backing path. */
+      supported->usage |= usage;
       supported->maximum.width = MIN2(supported->maximum.width, properties.maxExtent.width);
       supported->maximum.height = MIN2(supported->maximum.height, properties.maxExtent.height);
    }
