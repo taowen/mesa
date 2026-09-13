@@ -402,6 +402,9 @@ get_blit_type(const struct wsi_device *wsi,
               VkDevice device)
 {
    switch (params->image_type) {
+   case WSI_IMAGE_TYPE_ANDROID:
+      return container_of(params, const struct wsi_android_image_params, base)->buffer_blit ?
+         WSI_SWAPCHAIN_BUFFER_BLIT : WSI_SWAPCHAIN_NO_BLIT;
    case WSI_IMAGE_TYPE_CPU: {
       const struct wsi_cpu_image_params *cpu_params =
          container_of(params, const struct wsi_cpu_image_params, base);
@@ -453,6 +456,16 @@ configure_image(const struct wsi_swapchain *chain,
    info->color_space = pCreateInfo->imageColorSpace;
 
    switch (params->image_type) {
+   case WSI_IMAGE_TYPE_ANDROID: {
+      const struct wsi_android_image_params *android =
+         container_of(params, const struct wsi_android_image_params, base);
+      VkResult result = wsi_configure_image(chain, pCreateInfo,
+                          android->buffer_blit ? 0 : VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, info);
+      info->image_type = WSI_IMAGE_TYPE_ANDROID;
+      if (result == VK_SUCCESS && android->buffer_blit)
+         wsi_configure_buffer_image(chain, pCreateInfo, 1, 1, info);
+      return result;
+   }
    case WSI_IMAGE_TYPE_CPU: {
       const struct wsi_cpu_image_params *cpu_params =
          container_of(params, const struct wsi_cpu_image_params, base);
@@ -573,7 +586,8 @@ wsi_swapchain_init(const struct wsi_device *wsi,
       goto fail;
 
 #ifdef HAVE_LIBDRM
-   result = wsi_drm_init_swapchain_implicit_sync(chain);
+   result = image_params->image_type == WSI_IMAGE_TYPE_ANDROID ? VK_SUCCESS :
+      wsi_drm_init_swapchain_implicit_sync(chain);
    if (result != VK_SUCCESS)
       goto fail;
 #endif
@@ -3223,7 +3237,8 @@ wsi_cmd_blit_image_to_buffer(VkCommandBuffer cmd_buffer,
                              uint32_t qfi)
 {
    assert(info->image_type == WSI_IMAGE_TYPE_CPU ||
-          info->image_type == WSI_IMAGE_TYPE_DRM);
+          info->image_type == WSI_IMAGE_TYPE_DRM ||
+          info->image_type == WSI_IMAGE_TYPE_ANDROID);
 
    VkImageMemoryBarrier img_mem_barrier = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
