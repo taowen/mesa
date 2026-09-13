@@ -81,6 +81,7 @@ struct kopper_displaytarget
 {
    unsigned refcount;
    VkFormat formats[2];
+   VkColorSpaceKHR color_space;
    unsigned width;
    unsigned height;
    unsigned stride;
@@ -148,6 +149,11 @@ static inline struct pipe_screen * kopper_get_zink_screen(struct pipe_screen *sc
 
 void
 zink_kopper_update_last_written(struct zink_resource *res);
+
+enum pipe_format
+zink_kopper_choose_format(struct pipe_screen *pscreen,
+                         const struct kopper_loader_info *info,
+                         enum pipe_format format);
 
 struct kopper_displaytarget *
 zink_kopper_displaytarget_create(struct zink_screen *screen, unsigned tex_usage,
