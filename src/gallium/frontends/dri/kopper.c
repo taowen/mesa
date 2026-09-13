@@ -319,6 +319,9 @@ XXX do this once swapinterval is hooked up
             drawable->textures[statts[i]] =
                screen->base.screen->resource_create_drawable(screen->base.screen, &templ, data);
             drawable->window_valid = !!drawable->textures[statts[i]];
+            /* A failed swapchain is not a usable offscreen window buffer. */
+            if (!drawable->window_valid)
+               return;
          }
 #ifdef VK_USE_PLATFORM_XCB_KHR
          else if (is_pixmap && statts[i] == ST_ATTACHMENT_FRONT_LEFT && !screen->is_sw) {
@@ -486,6 +489,10 @@ kopper_init_drawable(struct dri_drawable *drawable, bool isPixmap, int alphaBits
       screen->kopper_loader->SetSurfaceCreateInfo(drawable->loaderPrivate,
                                                   &drawable->info);
    drawable->is_window = !isPixmap && drawable->info.bos.sType != 0;
+   if (drawable->is_window)
+      drawable->stvis.color_format = zink_kopper_choose_format(
+         kopper_get_zink_screen(screen->base.screen), &drawable->info,
+         drawable->stvis.color_format);
 
 #ifdef VK_USE_PLATFORM_XCB_KHR
    if (drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR) {
