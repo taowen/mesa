@@ -34,6 +34,8 @@ struct wsi_arlinux_image {
    int32_t ints[ARLINUX_MAX_INTS];
    unsigned num_fds, num_ints;
    uint32_t stride, format, serial;
+   bool linear_layout;
+   uint32_t layout_format, layout_stride;
    uint64_t trace_id;
    enum { ARLINUX_FREE, ARLINUX_ACQUIRED, ARLINUX_PRESENTED } state;
 };

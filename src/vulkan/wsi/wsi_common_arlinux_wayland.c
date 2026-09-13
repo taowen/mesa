@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "wsi_common_arlinux.h"
 #include "wayland-android-client-protocol.h"
+#include "drm-uapi/drm_fourcc.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -12,7 +13,7 @@ global(void *data, struct wl_registry *registry, uint32_t name,
 {
    struct wsi_arlinux_chain *chain = data;
    if (!chain->wlegl && version >= 2 && !strcmp(interface, "android_wlegl"))
-      chain->wlegl = wl_registry_bind(registry, name, &android_wlegl_interface, 2);
+      chain->wlegl = wl_registry_bind(registry, name, &android_wlegl_interface, MIN2(version, 3));
    if (!chain->owns_display && !chain->compositor && !strcmp(interface, "wl_compositor"))
       chain->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 1);
 }
@@ -113,8 +114,22 @@ buffer_ready(void *data, struct android_wlegl_server_buffer_handle *handle,
    wl_buffer_add_listener(buffer, &buffer_listener, image);
 }
 
+static void
+buffer_linear_layout(void *data, struct android_wlegl_server_buffer_handle *handle,
+                     uint32_t format, uint32_t stride)
+{
+   struct wsi_arlinux_image *image = data;
+   if (image->linear_layout || image->buffer) {
+      image->chain->status = VK_ERROR_FORMAT_NOT_SUPPORTED;
+      return;
+   }
+   image->linear_layout = true;
+   image->layout_format = format;
+   image->layout_stride = stride;
+}
+
 static const struct android_wlegl_server_buffer_handle_listener alloc_listener = {
-   buffer_fd, buffer_ints, buffer_ready,
+   buffer_fd, buffer_ints, buffer_ready, buffer_linear_layout,
 };
 
 VkResult
@@ -133,14 +148,22 @@ wsi_arlinux_alloc_buffer(struct wsi_arlinux_chain *chain, struct wsi_arlinux_ima
       return VK_ERROR_SURFACE_LOST_KHR;
    if (chain->status != VK_SUCCESS)
       return chain->status;
-   /* Same Qualcomm private-handle test as Mesa's u_gralloc fallback. Never
-    * treat an unknown or UBWC layout as a linear image merely because a first
-    * FD happens to exist. CPU-readable allocations normally clear UBWC. */
-   if (!image->buffer || !image->num_fds || image->num_ints < 2 ||
-       image->ints[0] != 0x676d736d || (image->ints[1] & 0x08000000) ||
+   if (!image->buffer || !image->num_fds ||
        image->format != chain->format || image->stride < chain->width ||
        image->stride > UINT32_MAX / 4)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   if (image->linear_layout) {
+      /* New gralloc handles need not contain Qualcomm's old magic. The
+       * compositor can instead attest the actual Android mapper metadata. */
+      uint32_t format = chain->format == 5 ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_ABGR8888;
+      if (image->layout_format != format || image->layout_stride != image->stride * 4)
+         return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   } else if (image->num_ints < 2 || image->ints[0] != 0x676d736d ||
+              (image->ints[1] & 0x08000000)) {
+      /* Keep the existing u_gralloc-compatible fallback for old compositors
+       * and mappers. Unknown or UBWC layouts remain unsupported. */
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   }
    return VK_SUCCESS;
 }
 
