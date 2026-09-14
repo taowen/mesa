@@ -9594,6 +9594,17 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
     */
    tu_emit_cache_flush<CHIP>(cmd);
 
+   /* A graphics program between compute pipeline binding and dispatch can
+    * overwrite the shared constant mode. Restore it before loading constants.
+    */
+   if (CHIP == A6XX) {
+      with_crb (cs) {
+         tu6_emit_shared_consts_enable<CHIP>(
+            crb, ir3_const_state(shader->variant)->push_consts_type ==
+                    IR3_PUSH_CONSTS_SHARED);
+      }
+   }
+
    /* note: no reason to have this in a separate IB */
    tu_cs_emit_state_ib(cs, tu_emit_consts<CHIP>(cmd, true));
 
