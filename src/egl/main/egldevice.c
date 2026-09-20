@@ -499,7 +499,11 @@ _eglQueryDevicesEXT(EGLint max_devices, _EGLDevice **devices,
    num_devs = _eglDeviceRefreshList();
    devs = _eglGlobal.DeviceList;
 
-#ifdef HAVE_SWRAST
+#if defined(HAVE_SWRAST) || defined(HAVE_ZINK)
+   /* Zink can create a screen without a DRM fd: Vulkan owns device discovery
+    * (for example with a KGSL driver). Keep the existing fd-less EGL device
+    * available in Zink-only builds so EGL_PLATFORM_DEVICE clients can use it,
+    * just as EGL_PLATFORM_SURFACELESS clients already do. */
    swrast = devs;
 #else
    swrast = NULL;
