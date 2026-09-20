@@ -609,7 +609,7 @@ kopperSetSwapInterval(struct dri_drawable *drawable, int interval)
     * we're before allocation, then the initial_swap_interval will be used when
     * the swapchain is eventually created.
     */
-   if (ptex) {
+   if (ptex && zink_kopper_check(ptex)) {
       struct pipe_screen *pscreen = kopper_get_zink_screen(screen->base.screen);
       zink_kopper_set_swap_interval(pscreen, ptex, interval);
    }
@@ -624,7 +624,7 @@ kopperQueryBufferAge(struct dri_drawable *drawable)
                                 drawable->textures[ST_ATTACHMENT_FRONT_LEFT];
 
    /* can't get buffer age from non-window swapchain */
-   if (!drawable->window_valid)
+   if (!drawable->window_valid || !ptex || !zink_kopper_check(ptex))
       return 0;
 
    /* Wait for glthread to finish because we can't use pipe_context from
