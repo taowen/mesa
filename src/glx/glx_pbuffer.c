@@ -312,13 +312,15 @@ __glXQueryDrawable(Display * dpy, GLXDrawable drawable,
    }
 
    if (pdraw) {
-      if (attribute == GLX_SWAP_INTERVAL_EXT) {
+      if (attribute == GLX_SWAP_INTERVAL_EXT &&
+          pdraw->psc->driScreen.getSwapInterval) {
          *value = abs(pdraw->psc->driScreen.getSwapInterval(pdraw));
          return 1;
       } else if (attribute == GLX_MAX_SWAP_INTERVAL_EXT) {
          *value = pdraw->psc->driScreen.maxSwapInterval;
          return 1;
-      } else if (attribute == GLX_LATE_SWAPS_TEAR_EXT) {
+      } else if (attribute == GLX_LATE_SWAPS_TEAR_EXT &&
+                 pdraw->psc->driScreen.getSwapInterval) {
          *value = pdraw->psc->driScreen.getSwapInterval(pdraw) < 0;
          return 1;
       }
