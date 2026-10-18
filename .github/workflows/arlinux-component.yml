@@ -27,12 +27,6 @@ jobs:
           ref: ${{ fromJSON(inputs.request).framework }}
           path: framework
           persist-credentials: false
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          repository: taowen/arlinux
-          ref: ${{ fromJSON(inputs.request).android }}
-          path: android
-          persist-credentials: false
       - name: Prepare the component host
         id: prepare
         shell: bash
