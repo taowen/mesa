@@ -53,3 +53,9 @@ jobs:
         if: always() && runner.os == 'Linux'
         shell: bash
         run: CCACHE_DIR=/opt/arlinux/cache/ccache ccache --show-stats
+      - name: Compact successful build cache
+        if: success() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          script="$ARLINUX_FRAMEWORK/arlinux/build/compact-cache.py"
+          if [ -f "$script" ]; then python "$script"; fi
