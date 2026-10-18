@@ -1,7 +1,7 @@
 # Mesa for Android Container
 Forked From [Mesa - The 3D Graphics Library](https://gitlab.freedesktop.org/mesa/mesa)
 
-**English** | [简体中文](docs/zh-HanS/README.md) | [繁體中文](docs/zh-HanT/README.md)
+**English** | [Simplified Chinese](docs/zh-HanS/README.md) | [Traditional Chinese](docs/zh-HanT/README.md)
 
 ---
 
