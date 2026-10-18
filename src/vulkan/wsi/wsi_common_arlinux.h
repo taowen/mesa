@@ -4,7 +4,9 @@
 
 #include "wsi_common_private.h"
 #include <wayland-client.h>
+#ifdef VK_USE_PLATFORM_XCB_KHR
 #include <xcb/xcb.h>
+#endif
 
 #define ARLINUX_MAX_IMAGES 8
 #define ARLINUX_MAX_FDS 32
@@ -61,10 +63,12 @@ struct wsi_arlinux_chain {
    struct wl_surface *surface; /* wrapper on the application's surface */
    struct wl_callback *frame;
 
+#ifdef VK_USE_PLATFORM_XCB_KHR
    xcb_connection_t *connection;
    xcb_window_t window;
    uint32_t eid, serial;
    xcb_special_event_t *events;
+#endif
 
    struct wsi_arlinux_image images[ARLINUX_MAX_IMAGES];
 };
@@ -80,6 +84,7 @@ VkResult wsi_arlinux_dispatch(struct wsi_arlinux_chain *chain, uint64_t timeout)
 VkResult wsi_arlinux_wayland_present(struct wsi_arlinux_chain *chain,
                                    struct wsi_arlinux_image *image);
 
+#ifdef VK_USE_PLATFORM_XCB_KHR
 bool wsi_arlinux_x11_supported(xcb_connection_t *connection, uint32_t visual);
 VkResult wsi_arlinux_x11_init(struct wsi_arlinux_chain *chain);
 void wsi_arlinux_x11_finish(struct wsi_arlinux_chain *chain);
@@ -88,4 +93,5 @@ VkResult wsi_arlinux_x11_present(struct wsi_arlinux_chain *chain,
                                struct wsi_arlinux_image *image);
 VkResult wsi_arlinux_x11_extent(xcb_connection_t *connection, uint32_t window,
                               VkExtent2D *extent);
+#endif
 #endif

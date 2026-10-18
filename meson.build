@@ -493,8 +493,8 @@ with_platform_android = _platforms.contains('android')
 with_platform_x11 = _platforms.contains('x11')
 with_platform_wayland = _platforms.contains('wayland')
 if with_arlinux_wsi
-  if not with_platform_x11 or not with_platform_wayland or not freedreno_kmds.contains('kgsl')
-    error('arlinux-wsi requires x11,wayland platforms and the KGSL KMD')
+  if not with_platform_wayland or not freedreno_kmds.contains('kgsl')
+    error('arlinux-wsi requires the wayland platform and the KGSL KMD')
   endif
   pre_args += '-DHAVE_ARLINUX_WSI'
 endif

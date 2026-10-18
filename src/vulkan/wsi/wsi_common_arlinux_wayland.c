@@ -183,15 +183,19 @@ wsi_arlinux_dispatch(struct wsi_arlinux_chain *chain, uint64_t timeout)
       if (dispatched < 0)
          return chain->status = VK_ERROR_SURFACE_LOST_KHR;
       if (dispatched) {
+#ifdef VK_USE_PLATFORM_XCB_KHR
          if (chain->connection) wsi_arlinux_x11_drain(chain);
+#endif
          return chain->status;
       }
    }
    struct pollfd fds[2] = {
       { .fd = wl_display_get_fd(chain->display), .events = POLLIN },
-      { .fd = chain->connection ? xcb_get_file_descriptor(chain->connection) : -1,
-        .events = POLLIN },
+      { .fd = -1, .events = POLLIN },
    };
+#ifdef VK_USE_PLATFORM_XCB_KHR
+   fds[1].fd = chain->connection ? xcb_get_file_descriptor(chain->connection) : -1;
+#endif
    if (wl_display_flush(chain->display) < 0) {
       if (errno != EAGAIN) {
          wl_display_cancel_read(chain->display);
@@ -212,7 +216,9 @@ wsi_arlinux_dispatch(struct wsi_arlinux_chain *chain, uint64_t timeout)
        ((fds[0].revents | fds[1].revents) & (POLLERR | POLLHUP | POLLNVAL)) ||
        wl_display_dispatch_queue_pending(chain->display, chain->queue) < 0)
       return chain->status = VK_ERROR_SURFACE_LOST_KHR;
+#ifdef VK_USE_PLATFORM_XCB_KHR
    if (chain->connection) wsi_arlinux_x11_drain(chain);
+#endif
    return chain->status;
 }
 

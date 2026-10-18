@@ -39,7 +39,10 @@ if with_arlinux_wsi
     input : android_xml, output : 'wayland-android-protocol.c',
     command : [scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
   files_vulkan_wsi += files('wsi_common_arlinux.c', 'wsi_common_arlinux_formats.c',
-    'wsi_common_arlinux_wayland.c', 'wsi_common_arlinux_x11.c')
+    'wsi_common_arlinux_wayland.c')
+  if with_platform_x11
+    files_vulkan_wsi += files('wsi_common_arlinux_x11.c')
+  endif
 endif
 
 if with_platform_windows

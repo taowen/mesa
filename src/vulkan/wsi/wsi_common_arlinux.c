@@ -8,7 +8,9 @@
 #include "vk_physical_device.h"
 #include "vk_util.h"
 #include "util/os_time.h"
+#ifdef VK_USE_PLATFORM_XCB_KHR
 #include <X11/Xlib-xcb.h>
+#endif
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -18,6 +20,7 @@ is_wayland(VkIcdSurfaceBase *surface)
    return surface->platform == VK_ICD_WSI_PLATFORM_WAYLAND;
 }
 
+#ifdef VK_USE_PLATFORM_XCB_KHR
 static xcb_connection_t *
 x_connection(VkIcdSurfaceBase *surface)
 {
@@ -32,6 +35,8 @@ x_window(VkIcdSurfaceBase *surface)
    return surface->platform == VK_ICD_WSI_PLATFORM_XLIB ?
       ((VkIcdSurfaceXlib *)surface)->window : ((VkIcdSurfaceXcb *)surface)->window;
 }
+
+#endif
 
 static bool
 has_allocator(struct wl_display *display)
@@ -56,6 +61,7 @@ get_support(VkIcdSurfaceBase *surface, struct wsi_device *wsi, uint32_t queue,
    if (is_wayland(surface)) {
       *supported = has_allocator(((VkIcdSurfaceWayland *)surface)->display);
    } else {
+#ifdef VK_USE_PLATFORM_XCB_KHR
       xcb_connection_t *connection = x_connection(surface);
       xcb_generic_error_t *error = NULL;
       xcb_get_window_attributes_reply_t *attrs = xcb_get_window_attributes_reply(connection,
@@ -64,6 +70,7 @@ get_support(VkIcdSurfaceBase *surface, struct wsi_device *wsi, uint32_t queue,
          *supported = wsi_arlinux_x11_supported(connection, attrs->visual) && has_allocator(NULL);
       free(attrs);
       free(error);
+#endif
    }
    return VK_SUCCESS;
 }
@@ -77,10 +84,12 @@ get_capabilities(VkIcdSurfaceBase *surface, struct wsi_device *wsi,
    if (result != VK_SUCCESS) return result;
    if (!supported.count) return VK_ERROR_SURFACE_LOST_KHR;
    VkExtent2D extent = { UINT32_MAX, UINT32_MAX };
+#ifdef VK_USE_PLATFORM_XCB_KHR
    if (!is_wayland(surface)) {
       VkResult result = wsi_arlinux_x11_extent(x_connection(surface), x_window(surface), &extent);
       if (result != VK_SUCCESS) return result;
    }
+#endif
    caps->surfaceCapabilities = (VkSurfaceCapabilitiesKHR) {
       .minImageCount = 3, .maxImageCount = ARLINUX_MAX_IMAGES,
       .currentExtent = extent,
@@ -252,9 +261,14 @@ present(struct wsi_swapchain *base, uint32_t index, uint64_t present_id,
                                            true, UINT64_MAX);
    mtx_lock(&chain->lock);
    if (result == VK_SUCCESS) result = chain->status;
-   if (result == VK_SUCCESS)
-      result = chain->connection ? wsi_arlinux_x11_present(chain, &chain->images[index]) :
-                                  wsi_arlinux_wayland_present(chain, &chain->images[index]);
+   if (result == VK_SUCCESS) {
+#ifdef VK_USE_PLATFORM_XCB_KHR
+      if (chain->connection)
+         result = wsi_arlinux_x11_present(chain, &chain->images[index]);
+      else
+#endif
+         result = wsi_arlinux_wayland_present(chain, &chain->images[index]);
+   }
    if (result != VK_SUCCESS) chain->status = result;
    mtx_unlock(&chain->lock);
    return result;
@@ -264,7 +278,9 @@ static VkResult
 destroy(struct wsi_swapchain *base, const VkAllocationCallbacks *alloc)
 {
    struct wsi_arlinux_chain *chain = (void *)base;
+#ifdef VK_USE_PLATFORM_XCB_KHR
    wsi_arlinux_x11_finish(chain);
+#endif
    for (unsigned i = 0; i < base->image_count; i++) {
       wsi_destroy_image(base, &chain->images[i].base);
       wsi_arlinux_free_buffer(&chain->images[i]);
@@ -453,10 +469,15 @@ create_swapchain_for_layout(VkIcdSurfaceBase *surface, VkDevice device, struct w
        * buffer scale or transform. The entire presented surface is opaque. */
       wl_region_add(chain->opaque_region, 0, 0, INT32_MAX, INT32_MAX);
    } else {
+#ifdef VK_USE_PLATFORM_XCB_KHR
       chain->connection = x_connection(surface);
       chain->window = x_window(surface);
       result = wsi_arlinux_x11_init(chain);
       if (result != VK_SUCCESS) goto fail;
+#else
+      result = VK_ERROR_SURFACE_LOST_KHR;
+      goto fail;
+#endif
    }
    for (unsigned i = 0; i < chain->base.image_count; i++) {
       struct wsi_arlinux_image *image = &chain->images[i];
@@ -509,6 +530,7 @@ static struct wsi_interface interface = {
    .create_swapchain = create_swapchain,
 };
 
+#ifdef VK_USE_PLATFORM_XCB_KHR
 VkResult
 wsi_x11_init_wsi(struct wsi_device *wsi, const VkAllocationCallbacks *alloc,
                 const struct driOptionCache *options)
@@ -517,6 +539,7 @@ wsi_x11_init_wsi(struct wsi_device *wsi, const VkAllocationCallbacks *alloc,
    return VK_SUCCESS;
 }
 void wsi_x11_finish_wsi(struct wsi_device *wsi, const VkAllocationCallbacks *alloc) {}
+#endif
 VkResult
 wsi_wl_init_wsi(struct wsi_device *wsi, const VkAllocationCallbacks *alloc, VkPhysicalDevice device)
 {
@@ -525,6 +548,7 @@ wsi_wl_init_wsi(struct wsi_device *wsi, const VkAllocationCallbacks *alloc, VkPh
 }
 void wsi_wl_finish_wsi(struct wsi_device *wsi, const VkAllocationCallbacks *alloc) {}
 
+#ifdef VK_USE_PLATFORM_XCB_KHR
 VKAPI_ATTR VkBool32 VKAPI_CALL
 wsi_GetPhysicalDeviceXcbPresentationSupportKHR(VkPhysicalDevice physical, uint32_t queue,
                                               xcb_connection_t *connection, xcb_visualid_t visual)
@@ -544,6 +568,7 @@ wsi_GetPhysicalDeviceXlibPresentationSupportKHR(VkPhysicalDevice physical, uint3
    return wsi_GetPhysicalDeviceXcbPresentationSupportKHR(physical, queue,
                                                         XGetXCBConnection(display), visual);
 }
+#endif
 VKAPI_ATTR VkBool32 VKAPI_CALL
 wsi_GetPhysicalDeviceWaylandPresentationSupportKHR(VkPhysicalDevice physical, uint32_t queue,
                                                   struct wl_display *display)
@@ -570,8 +595,10 @@ wsi_Create##Name##SurfaceKHR(VkInstance handle, const Vk##Name##SurfaceCreateInf
    *out = VkIcdSurfaceBase_to_handle(&surface->base); \
    return VK_SUCCESS; \
 }
+#ifdef VK_USE_PLATFORM_XCB_KHR
 CREATE_SURFACE(Xcb, connection, XCB, surface->connection = info->connection; surface->window = info->window;)
 CREATE_SURFACE(Xlib, dpy, XLIB, surface->dpy = info->dpy; surface->window = info->window;)
+#endif
 CREATE_SURFACE(Wayland, display, WAYLAND, surface->display = info->display; surface->surface = info->surface;)
 #undef CREATE_SURFACE
 
