@@ -38,6 +38,11 @@ jobs:
         shell: bash
         run: python framework/tools/build/github-component.py prepare
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        if: runner.os == 'Linux' && steps.prepare.outputs.vendor-key != ''
+        with:
+          path: /opt/arlinux/cache/downloads
+          key: arlinux-vendor-${{ runner.arch }}-${{ steps.prepare.outputs.vendor-key }}
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         if: runner.os == 'Linux'
         with:
           path: ${{ steps.prepare.outputs.cache-paths }}
