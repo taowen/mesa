@@ -40,8 +40,9 @@ jobs:
         if: runner.os == 'Linux'
         with:
           path: ${{ steps.prepare.outputs.cache-paths }}
-          key: arlinux-${{ runner.arch }}-${{ fromJSON(inputs.request).stage }}-${{ fromJSON(inputs.request).identity }}
+          key: arlinux-v2-${{ runner.arch }}-${{ fromJSON(inputs.request).stage }}-${{ fromJSON(inputs.request).identity }}
           restore-keys: |
+            arlinux-v2-${{ runner.arch }}-${{ fromJSON(inputs.request).stage }}-
             arlinux-${{ runner.arch }}-${{ fromJSON(inputs.request).stage }}-
       - name: Build through the product dispatcher
         shell: bash
