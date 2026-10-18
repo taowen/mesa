@@ -49,3 +49,7 @@ jobs:
       - name: Publish verified component capsule
         shell: bash
         run: python "$ARLINUX_FRAMEWORK/arlinux/build/github-component.py" publish
+      - name: Compiler cache statistics
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: CCACHE_DIR=/opt/arlinux/cache/ccache ccache --show-stats
