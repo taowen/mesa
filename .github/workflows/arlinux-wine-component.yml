@@ -1,0 +1,51 @@
+name: ARLinux component
+run-name: arlinux/${{ fromJSON(inputs.request).stage }}/${{ fromJSON(inputs.request).identity }}
+on:
+  workflow_dispatch:
+    inputs:
+      request:
+        description: Pinned component build request from build.ps1
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: arlinux-${{ fromJSON(inputs.request).stage }}-${{ fromJSON(inputs.request).identity }}
+  cancel-in-progress: false
+jobs:
+  component:
+    runs-on: ${{ contains(fromJSON('[]'), fromJSON(inputs.request).stage) && 'ubuntu-24.04-arm' || contains(fromJSON('["windows-fonts"]'), fromJSON(inputs.request).stage) && 'windows-latest' || 'ubuntu-24.04' }}
+    timeout-minutes: 350
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ARLINUX_COMPONENT_REQUEST: ${{ inputs.request }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: taowen/wine
+          ref: ${{ fromJSON(inputs.request).framework }}
+          path: framework
+          persist-credentials: false
+      - name: Prepare the component host
+        id: prepare
+        shell: bash
+        run: python framework/arlinux/build/github-component.py prepare
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        if: runner.os == 'Linux' && steps.prepare.outputs.vendor-key != ''
+        with:
+          path: /opt/arlinux/cache/downloads
+          key: arlinux-vendor-${{ runner.arch }}-${{ steps.prepare.outputs.vendor-key }}
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        if: runner.os == 'Linux'
+        with:
+          path: ${{ steps.prepare.outputs.cache-paths }}
+          key: arlinux-${{ runner.arch }}-${{ fromJSON(inputs.request).stage }}-${{ fromJSON(inputs.request).identity }}
+          restore-keys: |
+            arlinux-${{ runner.arch }}-${{ fromJSON(inputs.request).stage }}-
+      - name: Build through the product dispatcher
+        shell: bash
+        run: python "$ARLINUX_FRAMEWORK/arlinux/build/github-component.py" build
+      - name: Publish verified component capsule
+        shell: bash
+        run: python "$ARLINUX_FRAMEWORK/arlinux/build/github-component.py" publish
