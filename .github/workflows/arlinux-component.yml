@@ -39,7 +39,10 @@ jobs:
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         if: runner.os == 'Linux'
         with:
-          path: ${{ steps.prepare.outputs.cache-paths }}
+          path: |
+            ${{ steps.prepare.outputs.cache-paths }}
+            /opt/arlinux/cache/rootfs/seeds/*.tar.zst
+            /opt/arlinux/cache/rootfs/seeds/*.sha256
           key: arlinux-v2-${{ runner.arch }}-${{ fromJSON(inputs.request).stage }}-${{ fromJSON(inputs.request).identity }}
           restore-keys: |
             arlinux-v2-${{ runner.arch }}-${{ fromJSON(inputs.request).stage }}-
