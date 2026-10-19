@@ -32,10 +32,20 @@ jobs:
         shell: bash
         run: python framework/arlinux/build/github-component.py prepare
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
-        if: runner.os == 'Linux' && steps.prepare.outputs.vendor-key != ''
+        if: runner.os == 'Linux' && steps.prepare.outputs.vendor-ndk-key != ''
         with:
-          path: /opt/arlinux/cache/downloads
-          key: arlinux-vendor-${{ runner.arch }}-${{ steps.prepare.outputs.vendor-key }}
+          path: /opt/arlinux/cache/downloads/ndk
+          key: arlinux-tool-${{ runner.arch }}-ndk-${{ steps.prepare.outputs.vendor-ndk-key }}
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        if: runner.os == 'Linux' && steps.prepare.outputs.vendor-mingw-key != ''
+        with:
+          path: /opt/arlinux/cache/downloads/mingw
+          key: arlinux-tool-${{ runner.arch }}-mingw-${{ steps.prepare.outputs.vendor-mingw-key }}
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        if: runner.os == 'Linux' && steps.prepare.outputs.vendor-addons-key != ''
+        with:
+          path: /opt/arlinux/cache/downloads/addons
+          key: arlinux-tool-${{ runner.arch }}-addons-${{ steps.prepare.outputs.vendor-addons-key }}
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         if: runner.os == 'Linux' && steps.prepare.outputs.cache-paths != ''
         with:
