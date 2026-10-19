@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   component:
-    runs-on: ${{ contains(fromJSON('["yibu","debian","arch","omarchy","plasma","lxqt","linux-mesa","linux-hybris"]'), fromJSON(inputs.request).stage) && 'ubuntu-24.04-arm' || contains(fromJSON('[]'), fromJSON(inputs.request).stage) && 'windows-latest' || 'ubuntu-24.04' }}
+    runs-on: ${{ contains(fromJSON('["vulkan-capture","yibu","debian","arch","omarchy","plasma","lxqt","linux-mesa","linux-hybris"]'), fromJSON(inputs.request).stage) && 'ubuntu-24.04-arm' || contains(fromJSON('[]'), fromJSON(inputs.request).stage) && 'windows-latest' || 'ubuntu-24.04' }}
     timeout-minutes: 350
     env:
       GH_TOKEN: ${{ github.token }}
