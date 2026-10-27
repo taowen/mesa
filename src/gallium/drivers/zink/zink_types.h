@@ -264,6 +264,7 @@ enum zink_debug {
    ZINK_DEBUG_NOGENERAL = (1<<22),
    ZINK_DEBUG_RPSTORES = (1<<23),
    ZINK_DEBUG_PERFINFO = (1<<24),
+   ZINK_DEBUG_NONULL = (1<<25),
 };
 
 enum zink_pv_emulation_primitive {
@@ -1899,6 +1900,10 @@ struct zink_context {
    } hud;
 
    struct pipe_resource *dummy_xfb_buffer;
+   struct pipe_resource *dummy_descriptor_buffer;
+   struct pipe_surface *dummy_descriptor_surface;
+   struct zink_buffer_view *dummy_descriptor_bufferview;
+   void *dummy_descriptor_sampler;
 
    unsigned buffer_rebind_counter;
    unsigned image_rebind_counter;

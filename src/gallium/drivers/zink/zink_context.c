@@ -157,6 +157,11 @@ zink_context_destroy(struct pipe_context *pctx)
       util_blitter_destroy(ctx->blitter);
 
    pipe_resource_reference(&ctx->dummy_xfb_buffer, NULL);
+   pipe_surface_unref(&ctx->base, &ctx->dummy_descriptor_surface);
+   zink_buffer_view_reference(screen, &ctx->dummy_descriptor_bufferview, NULL);
+   pipe_resource_reference(&ctx->dummy_descriptor_buffer, NULL);
+   if (ctx->dummy_descriptor_sampler)
+      ctx->base.delete_sampler_state(&ctx->base, ctx->dummy_descriptor_sampler);
 
    zink_descriptors_deinit_bindless(ctx);
 
@@ -715,7 +720,9 @@ update_descriptor_state_ubo_lazy(struct zink_context *ctx, mesa_shader_stage sha
       }
 #endif
    } else {
-      ctx->di.t.ubos[shader][slot].buffer = VK_NULL_HANDLE;
+      ctx->di.t.ubos[shader][slot].buffer = screen->info.rb2_feats.nullDescriptor ? VK_NULL_HANDLE :
+         zink_resource(ctx->dummy_descriptor_buffer)->obj->buffer;
+      ctx->di.t.ubos[shader][slot].offset = 0;
       ctx->di.t.ubos[shader][slot].range = VK_WHOLE_SIZE;
    }
    return res;
@@ -744,7 +751,9 @@ update_descriptor_state_ssbo_lazy(struct zink_context *ctx, mesa_shader_stage sh
       ctx->di.t.ssbos[shader][slot].buffer = res->obj->buffer;
       ctx->di.t.ssbos[shader][slot].range = ctx->ssbos[shader][slot].buffer_size;
    } else {
-      ctx->di.t.ssbos[shader][slot].buffer = VK_NULL_HANDLE;
+      ctx->di.t.ssbos[shader][slot].buffer = zink_screen(ctx->base.screen)->info.rb2_feats.nullDescriptor ? VK_NULL_HANDLE :
+         zink_resource(ctx->dummy_descriptor_buffer)->obj->buffer;
+      ctx->di.t.ssbos[shader][slot].offset = 0;
       ctx->di.t.ssbos[shader][slot].range = VK_WHOLE_SIZE;
    }
    return res;
@@ -791,13 +800,16 @@ update_descriptor_state_sampler(struct zink_context *ctx, mesa_shader_stage shad
          }
       }
    } else {
-      ctx->di.textures[shader][slot].imageView = VK_NULL_HANDLE;
-      ctx->di.textures[shader][slot].imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      ctx->di.textures[shader][slot].imageView = screen->info.rb2_feats.nullDescriptor ? VK_NULL_HANDLE :
+         zink_surface(ctx->dummy_descriptor_surface)->image_view;
+      ctx->di.textures[shader][slot].imageLayout = screen->info.rb2_feats.nullDescriptor ?
+         VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
       if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
          ctx->di.db.tbos[shader][slot].address = 0;
          ctx->di.db.tbos[shader][slot].range = VK_WHOLE_SIZE;
       } else {
-         ctx->di.t.tbos[shader][slot] = VK_NULL_HANDLE;
+         ctx->di.t.tbos[shader][slot] = screen->info.rb2_feats.nullDescriptor ? VK_NULL_HANDLE :
+            ctx->dummy_descriptor_bufferview->buffer_view;
       }
    }
    return res;
@@ -834,11 +846,16 @@ update_descriptor_state_image(struct zink_context *ctx, mesa_shader_stage shader
       }
    } else {
       memset(&ctx->di.images[shader][slot], 0, sizeof(ctx->di.images[shader][slot]));
+      if (!screen->info.rb2_feats.nullDescriptor) {
+         ctx->di.images[shader][slot].imageView = zink_surface(ctx->dummy_descriptor_surface)->image_view;
+         ctx->di.images[shader][slot].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+      }
       if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
          ctx->di.db.texel_images[shader][slot].address = 0;
          ctx->di.db.texel_images[shader][slot].range = VK_WHOLE_SIZE;
       } else {
-         ctx->di.t.texel_images[shader][slot] = VK_NULL_HANDLE;
+         ctx->di.t.texel_images[shader][slot] = screen->info.rb2_feats.nullDescriptor ? VK_NULL_HANDLE :
+            ctx->dummy_descriptor_bufferview->buffer_view;
       }
    }
    return res;
@@ -882,7 +899,8 @@ zink_bind_sampler_states(struct pipe_context *pctx,
                ctx->di.textures[shader][start_slot + i].sampler = state->sampler_clamped;
          }
       } else {
-         ctx->di.textures[shader][start_slot + i].sampler = VK_NULL_HANDLE;
+         ctx->di.textures[shader][start_slot + i].sampler = ctx->dummy_descriptor_sampler ?
+            ((struct zink_sampler_state *)ctx->dummy_descriptor_sampler)->sampler : VK_NULL_HANDLE;
       }
    }
    ctx->di.num_samplers[shader] = start_slot + num_samplers;
@@ -1582,7 +1600,7 @@ zink_bind_vertex_buffers_internal(struct zink_context *ctx, const struct pipe_ve
          buffers[i] = res->obj->buffer;
          buffer_offsets[i] = vb->buffer_offset;
       } else {
-         buffers[i] = VK_NULL_HANDLE;
+         buffers[i] = ctx->dummy_descriptor_buffer ? zink_resource(ctx->dummy_descriptor_buffer)->obj->buffer : VK_NULL_HANDLE;
          buffer_offsets[i] = 0;
       }
    }
@@ -2939,7 +2957,8 @@ zink_update_fbfetch(struct zink_context *ctx)
          return false;
       zink_batch_no_rp(ctx);
       ctx->di.fbfetch.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-      ctx->di.fbfetch.imageView = VK_NULL_HANDLE;
+      ctx->di.fbfetch.imageView = ctx->dummy_descriptor_surface ?
+         zink_surface(ctx->dummy_descriptor_surface)->image_view : VK_NULL_HANDLE;
       ctx->invalidate_descriptor_state(ctx, MESA_SHADER_FRAGMENT, ZINK_DESCRIPTOR_TYPE_UBO, 0, 1);
       ctx->dynamic_fb.flags[0].flags &= ~VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR;
       return true;
@@ -2960,7 +2979,8 @@ zink_update_fbfetch(struct zink_context *ctx)
          zink_set_fs_base_key(ctx)->fbfetch_ms = fbfetch_ms;
       ctx->dynamic_fb.flags[0].flags |= VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR;
    } else {
-      ctx->di.fbfetch.imageView = VK_NULL_HANDLE;
+      ctx->di.fbfetch.imageView = ctx->dummy_descriptor_surface ?
+         zink_surface(ctx->dummy_descriptor_surface)->image_view : VK_NULL_HANDLE;
       ctx->dynamic_fb.flags[0].flags &= ~VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR;
    }
    bool ret = false;
@@ -5833,6 +5853,61 @@ zink_parse_tc_info(struct zink_context *ctx)
       ctx->rp_layout_changed = true;
 }
 
+static bool
+create_dummy_descriptors(struct zink_context *ctx)
+{
+   struct zink_screen *screen = zink_screen(ctx->base.screen);
+   unsigned size = MIN2(screen->info.props.limits.maxUniformBufferRange, 65536);
+   ctx->dummy_descriptor_buffer = pipe_buffer_create(&screen->base,
+      PIPE_BIND_VERTEX_BUFFER | PIPE_BIND_CONSTANT_BUFFER | PIPE_BIND_SHADER_BUFFER |
+      PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_SHADER_IMAGE, PIPE_USAGE_DEFAULT, size);
+   if (!ctx->dummy_descriptor_buffer)
+      return false;
+   ctx->dummy_descriptor_bufferview = get_buffer_view(ctx,
+      zink_resource(ctx->dummy_descriptor_buffer), PIPE_FORMAT_R8G8B8A8_UNORM, 0, size);
+   if (!ctx->dummy_descriptor_bufferview)
+      return false;
+
+   struct pipe_resource templ = {
+      .target = PIPE_TEXTURE_2D,
+      .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+      .width0 = 1, .height0 = 1, .depth0 = 1, .array_size = 1,
+      .bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_SHADER_IMAGE,
+   };
+   struct pipe_resource *image = screen->base.resource_create(&screen->base, &templ);
+   if (!image)
+      return false;
+   struct pipe_surface surface = { .format = templ.format };
+   ctx->dummy_descriptor_surface = ctx->base.create_surface(&ctx->base, image, &surface);
+   pipe_resource_reference(&image, NULL);
+   if (!ctx->dummy_descriptor_surface)
+      return false;
+
+   struct pipe_sampler_state sampler = {
+      .wrap_s = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+      .wrap_t = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+      .wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+   };
+   ctx->dummy_descriptor_sampler = ctx->base.create_sampler_state(&ctx->base, &sampler);
+   if (!ctx->dummy_descriptor_sampler)
+      return false;
+
+   const uint32_t zero = 0;
+   ctx->base.clear_buffer(&ctx->base, ctx->dummy_descriptor_buffer, 0, size, &zero, sizeof(zero));
+   union pipe_color_union color = {0};
+   struct pipe_box box;
+   u_box_2d(0, 0, 1, 1, &box);
+   ctx->base.clear_texture(&ctx->base, ctx->dummy_descriptor_surface->texture, 0, &box, &color);
+   screen->buffer_barrier(ctx, zink_resource(ctx->dummy_descriptor_buffer),
+      VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
+      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+   screen->image_barrier(ctx, zink_resource(ctx->dummy_descriptor_surface->texture),
+      VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INPUT_ATTACHMENT_READ_BIT,
+      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+   ctx->di.fbfetch.imageView = zink_surface(ctx->dummy_descriptor_surface)->image_view;
+   return true;
+}
+
 struct pipe_context *
 zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 {
@@ -6096,6 +6171,8 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
       ctx->invalidate_descriptor_state = zink_context_invalidate_descriptor_state_compact;
    else
       ctx->invalidate_descriptor_state = zink_context_invalidate_descriptor_state;
+   if (!is_copy_only && !screen->info.rb2_feats.nullDescriptor && !create_dummy_descriptors(ctx))
+      goto fail;
    if (!is_copy_only && !is_compute_only) {
       pipe_buffer_write_nooverlap(&ctx->base, ctx->dummy_xfb_buffer, 0, sizeof(data), data);
       if (screen->info.have_EXT_color_write_enable)
@@ -6121,6 +6198,8 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
             }
          }
          for (unsigned j = 0; j < ARRAY_SIZE(ctx->di.textures[i]); j++) {
+            if (ctx->dummy_descriptor_sampler)
+               ctx->di.textures[i][j].sampler = ((struct zink_sampler_state *)ctx->dummy_descriptor_sampler)->sampler;
             update_descriptor_state_sampler(ctx, i, j, NULL);
             if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB)
                ctx->di.db.tbos[i][j].sType = VK_STRUCTURE_TYPE_DESCRIPTOR_ADDRESS_INFO_EXT;

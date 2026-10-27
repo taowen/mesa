@@ -121,6 +121,7 @@ zink_debug_options[] = {
    { "rploads", ZINK_DEBUG_RPLOADS, "Zap renderpass loads for DONT_CARE" },
    { "nogeneral", ZINK_DEBUG_NOGENERAL, "Disable GENERAL layout usage for supported hardware" },
    { "rpstores", ZINK_DEBUG_RPSTORES, "Zap renderpass stores for DONT_CARE" },
+   { "nonull", ZINK_DEBUG_NONULL, "Disable native null descriptors" },
    DEBUG_NAMED_VALUE_END
 };
 
@@ -675,6 +676,12 @@ zink_init_shader_caps(struct zink_screen *screen)
       }
 
       caps->cont_supported = true;
+      if (!screen->info.rb2_feats.nullDescriptor) {
+         caps->max_shader_buffers = 0;
+         caps->max_shader_images = 0;
+         if (i == MESA_SHADER_COMPUTE)
+            caps->supported_irs = 0;
+      }
    }
 }
 
@@ -745,7 +752,7 @@ zink_init_screen_caps(struct zink_screen *screen)
    caps->ignored_output_varyings[MESA_SHADER_GEOMETRY] =
    caps->ignored_output_varyings[MESA_SHADER_MESH] = 0;
 
-   caps->null_textures = screen->info.rb_image_feats.robustImageAccess;
+   caps->null_textures = screen->info.rb2_feats.nullDescriptor && screen->info.rb_image_feats.robustImageAccess;
    /* support OVR_multiview and OVR_multiview2 */
    caps->multiview = screen->info.feats11.multiview * 2;
    caps->texrect = false;
@@ -997,7 +1004,7 @@ zink_init_screen_caps(struct zink_screen *screen)
    caps->glsl_feature_level_compatibility =
    caps->glsl_feature_level = 460;
 
-   caps->compute = true;
+   caps->compute = screen->info.rb2_feats.nullDescriptor;
 
    caps->constant_buffer_offset_alignment =
       screen->info.props.limits.minUniformBufferOffsetAlignment;
@@ -1017,6 +1024,7 @@ zink_init_screen_caps(struct zink_screen *screen)
    caps->primitive_restart = true;
 
    caps->bindless_texture =
+      screen->info.rb2_feats.nullDescriptor &&
       (zink_descriptor_mode != ZINK_DESCRIPTOR_MODE_DB ||
        (screen->info.db_props.maxDescriptorBufferBindings >= 2 &&
         screen->info.db_props.maxSamplerDescriptorBufferBindings >= 2)) &&
@@ -3571,10 +3579,10 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       goto fail;
    }
 
-   if (!screen->info.rb2_feats.nullDescriptor) {
-      mesa_loge("Zink requires the nullDescriptor feature of KHR/EXT robustness2.");
-      goto fail;
-   }
+   if (zink_debug & ZINK_DEBUG_NONULL)
+      screen->info.rb2_feats.nullDescriptor = VK_FALSE;
+   if (!screen->info.rb2_feats.nullDescriptor)
+      mesa_logi("Zink: using descriptor-set fallback without native nullDescriptor; storage shaders, compute and bindless textures are unavailable");
 
    if (zink_set_driver_strings(screen)) {
       mesa_loge("ZINK: failed to set driver strings\n");
@@ -3797,6 +3805,13 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    bool can_db = true;
    {
+      if (!screen->info.rb2_feats.nullDescriptor) {
+         if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
+            mesa_loge("Cannot use db descriptor mode without robustness2.nullDescriptor");
+            goto fail;
+         }
+         can_db = false;
+      }
       if (!screen->info.have_EXT_descriptor_buffer) {
          if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
             if (!screen->driver_name_is_inferred)
