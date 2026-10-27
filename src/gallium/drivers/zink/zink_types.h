@@ -1901,7 +1901,8 @@ struct zink_context {
 
    struct pipe_resource *dummy_xfb_buffer;
    struct pipe_resource *dummy_descriptor_buffer;
-   struct pipe_surface *dummy_descriptor_surface;
+   struct pipe_resource *dummy_descriptor_image;
+   struct zink_surface *dummy_descriptor_surface;
    struct zink_buffer_view *dummy_descriptor_bufferview;
    void *dummy_descriptor_sampler;
 

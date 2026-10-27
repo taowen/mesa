@@ -157,8 +157,7 @@ zink_context_destroy(struct pipe_context *pctx)
       util_blitter_destroy(ctx->blitter);
 
    pipe_resource_reference(&ctx->dummy_xfb_buffer, NULL);
-   pipe_surface_unref(&ctx->base, &ctx->dummy_descriptor_surface);
-   zink_buffer_view_reference(screen, &ctx->dummy_descriptor_bufferview, NULL);
+   pipe_resource_reference(&ctx->dummy_descriptor_image, NULL);
    pipe_resource_reference(&ctx->dummy_descriptor_buffer, NULL);
    if (ctx->dummy_descriptor_sampler)
       ctx->base.delete_sampler_state(&ctx->base, ctx->dummy_descriptor_sampler);
@@ -801,7 +800,7 @@ update_descriptor_state_sampler(struct zink_context *ctx, mesa_shader_stage shad
       }
    } else {
       ctx->di.textures[shader][slot].imageView = screen->info.rb2_feats.nullDescriptor ? VK_NULL_HANDLE :
-         zink_surface(ctx->dummy_descriptor_surface)->image_view;
+         ctx->dummy_descriptor_surface->image_view;
       ctx->di.textures[shader][slot].imageLayout = screen->info.rb2_feats.nullDescriptor ?
          VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
       if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
@@ -847,7 +846,7 @@ update_descriptor_state_image(struct zink_context *ctx, mesa_shader_stage shader
    } else {
       memset(&ctx->di.images[shader][slot], 0, sizeof(ctx->di.images[shader][slot]));
       if (!screen->info.rb2_feats.nullDescriptor) {
-         ctx->di.images[shader][slot].imageView = zink_surface(ctx->dummy_descriptor_surface)->image_view;
+         ctx->di.images[shader][slot].imageView = ctx->dummy_descriptor_surface->image_view;
          ctx->di.images[shader][slot].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
       }
       if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB) {
@@ -2958,7 +2957,7 @@ zink_update_fbfetch(struct zink_context *ctx)
       zink_batch_no_rp(ctx);
       ctx->di.fbfetch.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
       ctx->di.fbfetch.imageView = ctx->dummy_descriptor_surface ?
-         zink_surface(ctx->dummy_descriptor_surface)->image_view : VK_NULL_HANDLE;
+         ctx->dummy_descriptor_surface->image_view : VK_NULL_HANDLE;
       ctx->invalidate_descriptor_state(ctx, MESA_SHADER_FRAGMENT, ZINK_DESCRIPTOR_TYPE_UBO, 0, 1);
       ctx->dynamic_fb.flags[0].flags &= ~VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR;
       return true;
@@ -2980,7 +2979,7 @@ zink_update_fbfetch(struct zink_context *ctx)
       ctx->dynamic_fb.flags[0].flags |= VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR;
    } else {
       ctx->di.fbfetch.imageView = ctx->dummy_descriptor_surface ?
-         zink_surface(ctx->dummy_descriptor_surface)->image_view : VK_NULL_HANDLE;
+         ctx->dummy_descriptor_surface->image_view : VK_NULL_HANDLE;
       ctx->dynamic_fb.flags[0].flags &= ~VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR;
    }
    bool ret = false;
@@ -5874,12 +5873,11 @@ create_dummy_descriptors(struct zink_context *ctx)
       .width0 = 1, .height0 = 1, .depth0 = 1, .array_size = 1,
       .bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_SHADER_IMAGE,
    };
-   struct pipe_resource *image = screen->base.resource_create(&screen->base, &templ);
-   if (!image)
+   ctx->dummy_descriptor_image = screen->base.resource_create(&screen->base, &templ);
+   if (!ctx->dummy_descriptor_image)
       return false;
-   struct pipe_surface surface = { .format = templ.format };
-   ctx->dummy_descriptor_surface = ctx->base.create_surface(&ctx->base, image, &surface);
-   pipe_resource_reference(&image, NULL);
+   struct pipe_surface surface = { .format = templ.format, .texture = ctx->dummy_descriptor_image };
+   ctx->dummy_descriptor_surface = zink_create_fb_surface(&ctx->base, &surface);
    if (!ctx->dummy_descriptor_surface)
       return false;
 
@@ -5897,14 +5895,14 @@ create_dummy_descriptors(struct zink_context *ctx)
    union pipe_color_union color = {0};
    struct pipe_box box;
    u_box_2d(0, 0, 1, 1, &box);
-   ctx->base.clear_texture(&ctx->base, ctx->dummy_descriptor_surface->texture, 0, &box, &color);
+   ctx->base.clear_texture(&ctx->base, ctx->dummy_descriptor_image, 0, &box, &color);
    screen->buffer_barrier(ctx, zink_resource(ctx->dummy_descriptor_buffer),
       VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-   screen->image_barrier(ctx, zink_resource(ctx->dummy_descriptor_surface->texture),
+   screen->image_barrier(ctx, zink_resource(ctx->dummy_descriptor_image),
       VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INPUT_ATTACHMENT_READ_BIT,
       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-   ctx->di.fbfetch.imageView = zink_surface(ctx->dummy_descriptor_surface)->image_view;
+   ctx->di.fbfetch.imageView = ctx->dummy_descriptor_surface->image_view;
    return true;
 }
 
