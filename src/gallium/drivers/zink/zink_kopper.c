@@ -203,23 +203,10 @@ zink_kopper_choose_format(struct pipe_screen *pscreen,
 {
    struct zink_screen *screen = zink_screen(pscreen);
    VkFormat preferred = zink_get_format(screen, util_format_linear(format));
-   VkFormat alternate;
-   switch (preferred) {
-   case VK_FORMAT_B8G8R8A8_UNORM:
-      alternate = VK_FORMAT_R8G8B8A8_UNORM;
-      break;
-   case VK_FORMAT_R8G8B8A8_UNORM:
-      alternate = VK_FORMAT_B8G8R8A8_UNORM;
-      break;
-   case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
-      alternate = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
-      break;
-   case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
-      alternate = VK_FORMAT_A2R10G10B10_UNORM_PACK32;
-      break;
-   default:
+   if (preferred != VK_FORMAT_B8G8R8A8_UNORM && preferred != VK_FORMAT_R8G8B8A8_UNORM)
       return format;
-   }
+   VkFormat alternate = preferred == VK_FORMAT_B8G8R8A8_UNORM ?
+      VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_B8G8R8A8_UNORM;
    VkSurfaceKHR surface = kopper_create_surface_handle(screen, info);
    if (!surface)
       return format;
