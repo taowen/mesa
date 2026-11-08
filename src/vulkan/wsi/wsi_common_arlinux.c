@@ -576,6 +576,14 @@ CREATE_SURFACE(Wayland, display, WAYLAND, surface->display = info->display; surf
 #undef CREATE_SURFACE
 
 void
+wsi_x11_surface_destroy(VkIcdSurfaceBase *surface, VkInstance handle,
+                        const VkAllocationCallbacks *alloc)
+{
+   VK_FROM_HANDLE(vk_instance, instance, handle);
+   vk_free2(&instance->alloc, alloc, surface);
+}
+
+void
 wsi_wl_surface_destroy(VkIcdSurfaceBase *surface, VkInstance handle,
                        const VkAllocationCallbacks *alloc)
 {
