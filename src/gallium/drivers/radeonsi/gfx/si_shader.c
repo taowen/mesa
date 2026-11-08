@@ -858,9 +858,12 @@ static void si_preprocess_nir(struct si_nir_shader_ctx *ctx)
          /* This eliminates system values and unused shader output components. */
          ac_nir_lower_ps_early_options early_options = {
             .msaa_disabled = msaa_disabled,
+            .vrs_disabled = !sel->screen->options.vrs2x2 || sample_shading,
+            .custom_sample_locations_disabled = true,
             .load_sample_positions_always_loads_current_ones = true,
             .force_front_face = key->ps.opt.force_front_face_input,
             .sample_shading = sample_shading,
+            .lower_sample_pos = true,
 
             .fbfetch_is_1D = key->ps.mono.fbfetch_is_1D,
             .fbfetch_layered = key->ps.mono.fbfetch_layered,
@@ -887,7 +890,7 @@ static void si_preprocess_nir(struct si_nir_shader_ctx *ctx)
           * MSAA overrasterization over a single-sample color buffer.
           */
          if (key->ps.mono.poly_line_smoothing)
-            NIR_PASS(progress, nir, nir_lower_poly_line_smooth, SI_NUM_SMOOTH_AA_SAMPLES);
+            NIR_PASS(progress, nir, nir_lower_poly_line_smooth, true, SI_NUM_SMOOTH_AA_SAMPLES);
 
          /* This adds discard. */
          if (key->ps.part.prolog.poly_stipple)
@@ -904,7 +907,10 @@ static void si_preprocess_nir(struct si_nir_shader_ctx *ctx)
          NIR_PASS(progress, nir, ac_nir_lower_sample_mask_in, &lower_sample_mask_in_options);
 
          ac_nir_lower_ps_early_options early_options = {
+            .vrs_disabled = !sel->screen->options.vrs2x2 || nir->info.fs.uses_sample_shading,
+            .custom_sample_locations_disabled = true,
             .sample_shading = nir->info.fs.uses_sample_shading,
+            .lower_sample_pos = true,
             .lower_color_inputs_to_load_color01 = true,
             .alpha_func = COMPARE_FUNC_ALWAYS,
             .color_mask = ~0,
@@ -976,7 +982,6 @@ static void si_postprocess_nir(struct si_nir_shader_ctx *ctx)
 
    NIR_PASS(progress, nir, ac_nir_lower_tex_coords,
             &(ac_nir_lower_tex_coords_options){
-               .gfx_level = sel->screen->info.gfx_level,
                .lower_array_layer_round_even = !sel->screen->info.compiler_info.conformant_trunc_coord,
             });
 
@@ -1223,50 +1228,9 @@ static void si_postprocess_nir(struct si_nir_shader_ctx *ctx)
 
    si_nir_late_opts(nir);
 
-   /* Only do this for GPUs supporting 16-bit packed math. */
-   if (sel->screen->info.compiler_info.has_packed_math_16bit) {
-      /* Optimize types of image_sample sources and destinations.
-       *
-       * The image_sample sources bit sizes are:
-       *   nir_tex_src_coord:       a16 ? 16 : 32
-       *   nir_tex_src_comparator:  32
-       *   nir_tex_src_offset:      32
-       *   nir_tex_src_bias:        a16 ? 16 : 32
-       *   nir_tex_src_lod:         a16 ? 16 : 32
-       *   nir_tex_src_min_lod:     a16 ? 16 : 32
-       *   nir_tex_src_ms_index:    a16 ? 16 : 32
-       *   nir_tex_src_ddx:         has_g16 ? (g16 ? 16 : 32) : (a16 ? 16 : 32)
-       *   nir_tex_src_ddy:         has_g16 ? (g16 ? 16 : 32) : (a16 ? 16 : 32)
-       *
-       * We only use a16/g16 if all of the affected sources are 16bit.
-       */
-      bool separate_g16 = sel->screen->info.gfx_level >= GFX10;
-      struct nir_opt_tex_srcs_options opt_srcs_options[] = {
-         {
-            .sampler_dims =
-               ~(BITFIELD_BIT(GLSL_SAMPLER_DIM_CUBE) | BITFIELD_BIT(GLSL_SAMPLER_DIM_BUF)),
-            .src_types = (1 << nir_tex_src_coord) | (1 << nir_tex_src_lod) |
-                         (1 << nir_tex_src_bias) | (1 << nir_tex_src_min_lod) |
-                         (1 << nir_tex_src_ms_index) |
-                         (separate_g16 ? 0 : (1 << nir_tex_src_ddx) | (1 << nir_tex_src_ddy)),
-         },
-         {
-            .sampler_dims = ~BITFIELD_BIT(GLSL_SAMPLER_DIM_CUBE),
-            .src_types = (1 << nir_tex_src_ddx) | (1 << nir_tex_src_ddy),
-         },
-      };
-      struct nir_opt_16bit_tex_image_options opt_16bit_options = {
-         .rounding_mode = nir_rounding_mode_undef,
-         .opt_tex_dest_types = nir_type_float | nir_type_int | nir_type_uint,
-         .opt_image_dest_types = nir_type_float | nir_type_int | nir_type_uint,
-         .integer_dest_saturates = true,
-         .opt_image_store_data = true,
-         .opt_image_srcs = true,
-         .opt_srcs_options_count = separate_g16 ? 2 : 1,
-         .opt_srcs_options = opt_srcs_options,
-      };
+   if (sel->screen->info.gfx_level >= GFX8) {
       bool run_copy_prop = false;
-      NIR_PASS(run_copy_prop, nir, nir_opt_16bit_tex_image, &opt_16bit_options);
+      NIR_PASS(run_copy_prop, nir, ac_nir_opt_16bit_tex_image, sel->screen->info.gfx_level);
 
       /* Optimizing 16bit texture/image dests leaves scalar moves that stops
        * nir_opt_vectorize from vectorzing the alu uses of them.
@@ -1276,7 +1240,9 @@ static void si_postprocess_nir(struct si_nir_shader_ctx *ctx)
          NIR_PASS(_, nir, nir_opt_dce);
       }
 
-      NIR_PASS(_, nir, nir_opt_vectorize, ac_nir_opt_vectorize_cb, &sel->screen->info.gfx_level);
+      /* Only do this for GPUs supporting 16-bit packed math. */
+      if (sel->screen->info.compiler_info.has_packed_math_16bit)
+         NIR_PASS(_, nir, nir_opt_vectorize, ac_nir_opt_vectorize_cb, &sel->screen->info.gfx_level);
    }
 
    NIR_PASS(_, nir, nir_lower_alu_width, ac_nir_opt_vectorize_cb, &sel->screen->info.gfx_level);

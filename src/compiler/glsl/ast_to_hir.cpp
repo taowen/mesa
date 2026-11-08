@@ -5028,7 +5028,7 @@ handle_tess_ctrl_shader_output_decl(struct _mesa_glsl_parse_state *state,
          return;
       }
 
-      if (num_vertices > state->Const.MaxPatchVertices) {
+      if (num_vertices > MAX_PATCH_VERTICES) {
          _mesa_glsl_error(&loc, state, "vertices (%d) exceeds "
                           "GL_MAX_PATCH_VERTICES", num_vertices);
          return;
@@ -5119,12 +5119,12 @@ handle_tess_shader_input_decl(struct _mesa_glsl_parse_state *state,
     */
    if (glsl_type_is_unsized_array(var->type)) {
       var->type = glsl_array_type(var->type->fields.array,
-            state->Const.MaxPatchVertices, 0);
-   } else if (var->type->length != state->Const.MaxPatchVertices) {
+            MAX_PATCH_VERTICES, 0);
+   } else if (var->type->length != MAX_PATCH_VERTICES) {
       _mesa_glsl_error(&loc, state,
                        "per-vertex tessellation shader input arrays must be "
                        "sized to gl_MaxPatchVertices (%d).",
-                       state->Const.MaxPatchVertices);
+                       MAX_PATCH_VERTICES);
    }
 }
 

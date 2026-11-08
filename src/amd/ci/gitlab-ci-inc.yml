@@ -292,8 +292,8 @@
 ############### Common
 .amdgpu.ko-common:
   variables:
-    # Increase the timeout for GFX/COMPUTE to 10s to avoid spurious GPU hangs.
-    AMDGPU_COMMON_CMDLINE: 'amdgpu.lockup_timeout=10000,10000,0,0'
+    # Increase the timeout for GFX/COMPUTE/SDMA to 10s to avoid spurious GPU hangs.
+    AMDGPU_COMMON_CMDLINE: 'amdgpu.lockup_timeout=10000,10000,10000,0'
 
     # Make sure to use the same kernel across all the amdgpu.ko jobs
     KERNEL_TAG: "v6.17-mesa-47cd"
@@ -379,6 +379,8 @@
     - .amdgpu.ko-common
   variables:
     CI_TRON_PATTERN__JOB_WARN__REGEX: 'ring .* timeout'
+    CI_TRON_PATTERN__SESSION_REBOOT__REGEX: 'dial tcp: lookup ci-gateway: i/o timeout.'
+    CI_TRON_TIMEOUT__BOOT_CYCLE__RETRIES: 2
 
     # Kernel and modules
     CI_TRON_KERNEL__URL: "$KERNEL_IMAGE_BASE/x86_64/bzImage"

@@ -1062,6 +1062,26 @@ ir3_instr_remove(struct ir3_instruction *instr)
    }
 }
 
+struct ir3_instruction *
+ir3_instr_prev(struct ir3_instruction *instr)
+{
+   if (instr->node.prev == &instr->block->instr_list) {
+      return NULL;
+   }
+
+   return list_entry(instr->node.prev, struct ir3_instruction, node);
+}
+
+struct ir3_instruction *
+ir3_instr_next(struct ir3_instruction *instr)
+{
+   if (instr->node.next == &instr->block->instr_list) {
+      return NULL;
+   }
+
+   return list_entry(instr->node.next, struct ir3_instruction, node);
+}
+
 void
 ir3_instr_create_rpt(struct ir3_instruction **instrs, unsigned n)
 {
@@ -1223,7 +1243,7 @@ ir3_create_collect(struct ir3_builder *build,
    /* There should be at least one non-undef source to determine the type of the
     * destination.
     */
-   assert(non_undef_src != -1);
+   assume(non_undef_src != -1);
    unsigned flags = dest_flags(arr[non_undef_src]);
 
    /* If any of the sources are themselves collects, flatten their sources into
@@ -1658,9 +1678,8 @@ static unsigned
 cp_flags(unsigned flags)
 {
    /* only considering these flags (at least for now): */
-   flags &= (IR3_REG_CONST | IR3_REG_IMMED | IR3_REG_FNEG | IR3_REG_FABS |
-             IR3_REG_SNEG | IR3_REG_SABS | IR3_REG_BNOT | IR3_REG_RELATIV |
-             IR3_REG_SHARED);
+   flags &= (IR3_REG_CONST | IR3_REG_IMMED | IR3_REG_SRC_MODS |
+             IR3_REG_RELATIV | IR3_REG_SHARED);
    return flags;
 }
 
@@ -1776,7 +1795,7 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
          return false;
       break;
    case 2:
-      valid_flags = ir3_cat2_absneg(instr->opc) | IR3_REG_CONST |
+      valid_flags = ir3_cat2_absneg(compiler, instr->opc, n) | IR3_REG_CONST |
                     IR3_REG_RELATIV | IR3_REG_IMMED | IR3_REG_SHARED;
 
       if (flags & ~valid_flags)
@@ -1877,7 +1896,7 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
       /* TODO double check if this is still the case on a4xx */
       if (flags & (IR3_REG_CONST | IR3_REG_IMMED))
          return false;
-      if (flags & (IR3_REG_SABS | IR3_REG_SNEG))
+      if (flags & (IR3_REG_SABS | IR3_REG_SNEG | IR3_REG_BNOT))
          return false;
       break;
    case 5:
@@ -1942,11 +1961,15 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
             return false;
 
          /* disallow immediates in anything but the SSBO slot argument for
-          * cat6 instructions:
+          * cat6 instructions.  The a5xx global form is the exception: its
+          * last source is an immediate byte offset occupying a field that is
+          * a register everywhere else, so it has to reach the encoder as one.
           */
          if ((is_global_a3xx_atomic(instr->opc) ||
               is_bindless_atomic(instr->opc)) &&
-             (n != 0)) {
+             (n != 0) &&
+             !(n == 3 && is_global_a3xx_atomic(instr->opc) &&
+               !(instr->srcs[0]->flags & IR3_REG_IMMED))) {
             return false;
          }
 
@@ -2095,8 +2118,7 @@ static bool
 is_unmodified_full_gpr(struct ir3_register *src)
 {
    return !(src->flags & (IR3_REG_HALF | IR3_REG_CONST | IR3_REG_IMMED |
-                          IR3_REG_RELATIV | IR3_REG_FNEG | IR3_REG_FABS |
-                          IR3_REG_SNEG | IR3_REG_SABS | IR3_REG_BNOT));
+                          IR3_REG_RELATIV | IR3_REG_SRC_MODS));
 }
 
 /* Does `instr` move half of its full GPR src to its half dst? If this is the
@@ -2133,7 +2155,7 @@ ir3_is_subreg_move(struct ir3_instruction *instr)
 }
 
 inline unsigned
-ir3_cat2_absneg(opc_t opc)
+ir3_cat2_absneg(struct ir3_compiler *compiler, opc_t opc, unsigned src_n)
 {
    switch (opc) {
    case OPC_ADD_F:
@@ -2168,6 +2190,8 @@ ir3_cat2_absneg(opc_t opc)
    case OPC_MUL_S24:
    case OPC_MULL_U:
    case OPC_CLZ_S:
+   case OPC_NOT_B:
+   case OPC_MGEN_B:
       return 0;
 
    case OPC_ABSNEG_S:
@@ -2175,17 +2199,33 @@ ir3_cat2_absneg(opc_t opc)
 
    case OPC_AND_B:
    case OPC_OR_B:
-   case OPC_NOT_B:
    case OPC_XOR_B:
-   case OPC_BFREV_B:
    case OPC_CLZ_B:
+      if (compiler->gen >= 5) /* todo: check on a3xx */
+         return IR3_REG_BNOT;
+      return 0;
+
    case OPC_SHL_B:
    case OPC_SHR_B:
+      if (compiler->gen >= 6)
+         return src_n == 0 ? IR3_REG_BNOT : IR3_REG_SNEG;
+      return 0;
+
    case OPC_ASHR_B:
-   case OPC_MGEN_B:
+      if (compiler->gen >= 6 && src_n == 1)
+         return IR3_REG_SNEG;
+      return 0;
+
    case OPC_GETBIT_B:
+      if (src_n == 0 && compiler->gen >= 6)
+         return IR3_REG_BNOT;
+      return 0;
+
+   case OPC_BFREV_B:
    case OPC_CBITS_B:
-      return IR3_REG_BNOT;
+      if (compiler->gen >= 6)
+         return IR3_REG_BNOT;
+      return 0;
 
    default:
       return 0;

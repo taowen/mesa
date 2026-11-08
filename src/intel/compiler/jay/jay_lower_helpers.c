@@ -69,33 +69,43 @@ setup_exit_block(jay_builder *b, struct ctx *ctx)
 {
    jay_inst *send = jay_last_inst(jay_last_source_block(b->func));
    if ((send && send->op == JAY_OPCODE_SEND && jay_send_eot(send)) &&
-       (jay_is_imm(send->src[0]) && jay_is_imm(send->src[1]))) {
+       !send->simd_split &&
+       (jay_is_null(send->src[0]) && jay_is_null(send->src[1]))) {
       jay_remove_instruction(send);
       jay_builder_insert(b, send);
    } else {
       signed gpr = -1;
+      struct jay_register_block B;
       for (unsigned i = 0; i < b->shader->partition.nr_blocks[GPR]; ++i) {
-         struct jay_register_block B = b->shader->partition.blocks[GPR][i];
+         B = b->shader->partition.blocks[GPR][i];
          bool late_eot = !jay_has_early_eot(b->shader);
 
-         if (B.len_gpr >= 4 && (B.type == JAY_BLOCK_EOT ||
-                                (B.type == JAY_BLOCK_NORMAL && late_eot))) {
+         if (B.len_gpr >= 8 &&
+             (B.type == JAY_BLOCK_EOT || (B.type == JAY_BLOCK_NORMAL &&
+                                          late_eot &&
+                                          B.stride == JAY_STRIDE_4))) {
             gpr = B.start_gpr;
+            break;
          }
       }
 
       assert(gpr >= 0 && "must have a suitable gpr block");
       jay_def dummy = jay_bare_regs(GPR, gpr, 4);
+      unsigned width = b->shader->dispatch_width >> B.split;
 
-      unsigned op = b->shader->dispatch_width == 32 ?
-                       XE2_DATAPORT_RENDER_TARGET_WRITE_SIMD32_SINGLE_SOURCE :
-                       BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD16_SINGLE_SOURCE;
+      unsigned op =
+         width == 32 ?
+            XE2_DATAPORT_RENDER_TARGET_WRITE_SIMD32_SINGLE_SOURCE :
+         width == 16 ?
+            BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD16_SINGLE_SOURCE :
+            BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD8_SINGLE_SOURCE_SUBSPAN01;
       uint64_t desc = brw_fb_write_desc(b->shader->devinfo, 0, op, true, false);
       uint64_t ex_desc = (1 << 20) /* null rt */;
 
       send = jay_SEND(b, .sfid = GEN_SFID_RENDER_CACHE,
                       .msg_desc = desc | (ex_desc << 32), .nr_srcs = 1,
-                      .srcs = &dummy, .type = JAY_TYPE_U32, .eot = true);
+                      .srcs = &dummy, .type = JAY_TYPE_U32, .eot = true,
+                      .simd_width = b->shader->dispatch_width >> B.split);
       send =
          jay_add_predicate(b, send, jay_negate(ctx->helper_flag), jay_null());
    }
@@ -140,7 +150,7 @@ process_block(struct ctx *ctx, jay_builder *b, jay_block *block)
             halt = jay_add_predicate(b, halt, ctx->helper_flag, jay_null());
             ctx->halted = true;
 
-            jay_block *split = jay_new_block(b->func);
+            jay_block *split = jay_new_block(b->func, block->weight);
             list_partition(&block->instructions, &split->instructions,
                            &halt->link);
             list_addtail(&split->link, &block->link);
@@ -174,16 +184,7 @@ process_block(struct ctx *ctx, jay_builder *b, jay_block *block)
          mov->type = jay_flag_type(b->func);
          jay_remove_instruction(I);
       } else if (I->op == JAY_OPCODE_SEND && jay_send_skip_helpers(I)) {
-         if (I->uniform) {
-            /* I->cond_flag has been reserved for our use */
-            jay_inst *not = jay_NOT(b, jay_null(), ctx->helper_flag);
-            not->type = jay_flag_type(b->func);
-            not->uniform = true;
-            jay_set_conditional_mod(b, not, I->cond_flag, GEN_CONDITION_NE);
-            jay_add_predicate(b, I, I->cond_flag, jay_null());
-         } else {
-            jay_add_predicate(b, I, jay_negate(ctx->helper_flag), jay_null());
-         }
+         jay_add_predicate(b, I, jay_negate(ctx->helper_flag), jay_null());
       }
 
       ++ctx->instr_left;
@@ -198,11 +199,12 @@ jay_lower_helpers(jay_shader *shader)
 
    /* By ABI with jay_assign_flags, the last flag is used to track helpers */
    assert(shader->helpers_tracked);
-   unsigned helper_flag_no = shader->num_regs[FLAG] - 1;
+   unsigned helper_flag_no =
+      shader->num_regs[FLAG] - jay_phys_flag_per_virt(shader);
    struct ctx ctx = { .helper_flag = jay_bare_reg(FLAG, helper_flag_no) };
 
    /* Initialize the helper flag sensibly based on the dispatch mask (sr0.2) */
-   jay_def sr0_2 = jay_scalar(J_ARF, GEN_ARF_STATE);
+   jay_def sr0_2 = jay_scalar(J_ARF, 32, GEN_ARF_STATE);
    sr0_2.reg = 2;
    jay_NOT(&b, ctx.helper_flag, sr0_2)->type = jay_flag_type(entry);
 
@@ -217,3 +219,54 @@ jay_lower_helpers(jay_shader *shader)
 
    setup_exit_block(&b, &ctx);
 }
+
+/*
+ * The above post-RA pass handles predication of non-uniform SENDs efficiently.
+ * However, uniform (SIMD1) sends are trickier, since we need to predicate with
+ * the uniform condition: any(!gl_HelperInvocation).
+ *
+ * We implement as (ballot(true) & ~ballot_relaxed(gl_HelperInvocation)) != 0.
+ * This correctly handles control flow, although it could be optimized.
+ * We do this with a pre-RA pass since the register/scheduling requirements are
+ * nontrivial.
+ */
+static void
+pre_ra(jay_function *f)
+{
+   jay_foreach_block(f, block) {
+      jay_def predicate = jay_null();
+
+      jay_foreach_inst_in_block_safe(block, I) {
+         if (I->op == JAY_OPCODE_SEND &&
+             I->uniform &&
+             jay_send_skip_helpers(I)) {
+
+            jay_builder b = jay_init_builder(f, jay_before_inst(I));
+
+            if (jay_is_null(predicate)) {
+               predicate = jay_alloc_def(&b, FLAG, 32, 1);
+
+               jay_def helper = jay_alloc_def(&b, UGPR, 32, 1);
+               jay_IS_HELPER(&b, helper);
+
+               jay_def ballot = jay_alloc_def(&b, FLAG, 32, 1);
+               jay_inst *mov = jay_MOV(&b, jay_null(), 1);
+               jay_set_conditional_mod(&b, mov, ballot, GEN_CONDITION_NE);
+               mov->zero_inactive = true;
+
+               jay_inst *and = jay_AND(&b, jay_flag_type(f), jay_null(), ballot,
+                                       jay_negate(helper));
+               and->uniform = true;
+               jay_set_conditional_mod(&b, and, predicate, GEN_CONDITION_NE);
+            }
+
+            jay_set_send_skip_helpers(I, false);
+            jay_add_predicate(&b, I, predicate, jay_null());
+         } else if (I->op == JAY_OPCODE_DEMOTE) {
+            predicate = jay_null();
+         }
+      }
+   }
+}
+
+JAY_DEFINE_FUNCTION_PASS(jay_lower_helpers_pre_ra, pre_ra)

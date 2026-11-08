@@ -473,8 +473,8 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->depth_clip_disable = !is_a2xx(screen);
 
    caps->post_depth_coverage =
-   caps->depth_clip_disable_separate =
-   caps->demote_to_helper_invocation = is_a6xx(screen);
+   caps->depth_clip_disable_separate = is_a6xx(screen);
+   caps->demote_to_helper_invocation = is_a5xx(screen) || is_a6xx(screen);
 
    caps->sampler_reduction_minmax =
    caps->sampler_reduction_minmax_arb =
@@ -561,7 +561,7 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->fbfetch =
       fd_device_version(screen->dev) >= FD_VERSION_GMEM_BASE && is_a6xx(screen) ?
       screen->max_rts : 0;
-   caps->sample_shading = is_a6xx(screen);
+   caps->sample_shading = is_a5xx(screen) || is_a6xx(screen);
 
    caps->context_priority_mask = screen->priority_mask;
 

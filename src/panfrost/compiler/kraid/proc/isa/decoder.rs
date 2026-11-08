@@ -3,9 +3,9 @@
 
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::{Hash, Hasher};
 
-use crate::ident;
 use crate::isa::*;
 
 fn bitmask(n: u8) -> u64 {
@@ -133,10 +133,9 @@ impl DecoderNode<'_> {
         }
     }
 
-    fn to_tokens<F, G>(&self, elem_cb: &F, check_cb: &G) -> TokenStream
+    fn to_tokens_int<F>(&self, elem_cb: &F, tss: &mut Vec<TokenStream>) -> ()
     where
         F: Fn(&Instr) -> TokenStream,
-        G: Fn(&Instr) -> TokenStream,
     {
         match self {
             DecoderNode::Leaf { options } => {
@@ -146,173 +145,85 @@ impl DecoderNode<'_> {
                         let fixed_mask = option.fixed_mask;
                         let expected_masked =
                             option.fixed_value & option.fixed_mask;
-                        let check_ts = check_cb(option.instr);
                         let val_ts = elem_cb(option.instr);
-                        quote! {
-                            if (input_value & #fixed_mask) == #expected_masked {
-                                result = #check_ts.map(|_| #val_ts);
-                                if result.is_ok() {
-                                    return result;
-                                }
-                            }
-                        }
+                        quote! { (#fixed_mask, #expected_masked, #val_ts), }
                     })
                     .collect();
 
-                quote! {
-                    {
-                        let mut result = Err(InvalidInstrError::Any);
-                        #cases
-                        return result;
-                    }
-                }
+                tss.push(quote! { DecodeStage::Leaf(&[#cases]), });
             }
             DecoderNode::Internal { mask, children } => {
                 // For better readability, sort the keys for the output.
                 let mut sorted: Vec<_> = children.keys().collect();
                 sorted.sort();
 
-                let cases: TokenStream = sorted
-                    .into_iter()
-                    .map(|key| {
-                        let child_impl = children
-                            .get(key)
-                            .expect("Key must exist")
-                            .to_tokens(elem_cb, check_cb);
-                        quote! {
-                            #key => #child_impl,
-                        }
-                    })
-                    .collect();
+                // Placeholder for ourselves.
+                let own_idx = tss.len();
+                tss.push(quote! {});
 
-                quote! {
-                    match input_value & #mask {
-                        #cases
-                        _ => Err(InvalidInstrError::Any)
-                    }
+                let mut child_indices: TokenStream = Default::default();
+                for key in sorted {
+                    let child_impl = children.get(key).unwrap();
+                    let child_idx = tss.len();
+                    child_indices.extend(quote! {(#key, #child_idx),});
+                    child_impl.to_tokens_int(elem_cb, tss);
                 }
+
+                *tss.get_mut(own_idx).unwrap() = quote! {
+                    DecodeStage::Inner{mask: #mask, children: &[#child_indices]},
+                };
             }
         }
     }
+
+    fn to_tokens<F>(&self, elem_cb: &F) -> Vec<TokenStream>
+    where
+        F: Fn(&Instr) -> TokenStream,
+    {
+        let mut tss = Default::default();
+        self.to_tokens_int(elem_cb, &mut tss);
+        tss
+    }
 }
 
-struct LoadField<'a> {
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
+struct LoadField {
     name: String,
-    field: &'a InstrField,
+    load_fn: LoadFn,
+    decode_fn: DecodeFn,
+    is_mod: bool,
 }
 
-impl LoadField<'_> {
-    const DEFAULT_LOAD_TYPE: FieldType = FieldType::Uint(32);
-
-    fn new<'a>(name: &str, instr: &'a Instr) -> LoadField<'a> {
+impl LoadField {
+    fn new(name: &str, instr: &Instr) -> LoadField {
         let field = instr.get_named_field(name).unwrap();
-
         LoadField {
             name: String::from(name),
-            field,
+            load_fn: field.into(),
+            // Default to not printing. Decoding still checks field restrictions.
+            decode_fn: DecodeFn::new(field, None),
+            is_mod: false,
         }
     }
 
-    fn print_from_alias(&self) -> bool {
-        matches!(self.field.field_type(), Some(FieldType::Enum(_)))
+    fn set_decode(&mut self, print_as: PrintAs, instr: &Instr) {
+        let field = instr.get_named_field(&self.name).unwrap();
+        self.decode_fn = DecodeFn::new(field, Some(&print_as));
     }
 
-    fn ident_print(&self) -> Ident {
-        if self.print_from_alias() {
-            Ident::new(&format!("{}_", &self.name), Span::call_site())
-        } else {
-            Ident::new(&self.name, Span::call_site())
-        }
-    }
-
-    fn as_field_type_ts(&self, id_in: &Ident) -> TokenStream {
-        let field_type =
-            self.field.field_type().unwrap_or(&Self::DEFAULT_LOAD_TYPE);
-
-        match field_type {
-            FieldType::Enum(e) => {
-                let ei = &e.ident;
-                // All enums implement TryDecode<u8>
-                quote! { #ei::try_decode((#id_in) as u8, arch)? }
-            }
-            FieldType::Int(n) | FieldType::PcRelOffsetSigned(n) => {
-                // n == "physical size" + mod extra bits
-                // The mod has been reversed already, thus the "encoded" size
-                // here is exactly n.
-                quote! {sign_ext(#id_in, #n)}
-            }
-            FieldType::Source
-            | FieldType::Source64
-            | FieldType::Uint(_)
-            | FieldType::PcRelOffsetUnsigned(_) => quote! {#id_in},
-        }
-    }
-
-    fn is_valid_to_tokens(&self, id_in: &Ident, ts: &mut TokenStream) {
-        let field_type =
-            self.field.field_type().unwrap_or(&Self::DEFAULT_LOAD_TYPE);
-
-        ts.extend(match field_type {
-            FieldType::Enum(e) => {
-                if let Some(restrict) = self.field.restrict() {
-                    let ei = &e.ident;
-                    let mut ts: TokenStream = Default::default();
-
-                    for allowed_value in &restrict.values {
-                        assert!(
-                            format!("{}", allowed_value.enum_type.ident())
-                                == format!("{}", &e.ident),
-                        );
-                        let ev = &allowed_value.value_ident;
-                        ts.extend(quote! {#ei::#ev,});
-                    }
-
-                    quote! {if ! [#ts].contains(&#id_in) {
-                        return Err(InvalidInstrError::Any.into());
-                    }}
-                } else {
-                    quote! {}
-                }
-            }
-            FieldType::Int(_)
-            | FieldType::Uint(_)
-            | FieldType::PcRelOffsetSigned(_)
-            | FieldType::PcRelOffsetUnsigned(_) => quote! {}, // TODO
-            FieldType::Source | FieldType::Source64 => quote! {}, // TODO
+    fn table_entry(&self, ts: &mut TokenStream) {
+        let name = &self.name;
+        let is_mod = self.is_mod;
+        let load_fn = self.load_fn.ref_ts();
+        let decode_fn = self.decode_fn.ref_ts();
+        ts.extend(quote! {
+            Field {
+                name: #name,
+                is_mod: #is_mod,
+                load: #load_fn,
+                decode: #decode_fn,
+            },
         });
-    }
-}
-
-impl ToTokens for LoadField<'_> {
-    fn to_tokens(&self, ts: &mut TokenStream) {
-        let raw_load_ts = match self.field {
-            InstrField::Physical(f) => {
-                let mask = bitmask(f.bits.end - f.bits.start);
-                let start = f.bits.start;
-                let mut load_ts = quote! {((v >> #start) & #mask)};
-
-                load_ts = match &f.mod_ {
-                    FieldMod::Shr(n) => quote! {(#load_ts << #n)},
-                    FieldMod::Minus(n) => quote! {(#load_ts + #n)},
-                    FieldMod::Align(_) | FieldMod::None => load_ts,
-                };
-
-                // All values we unpack will fit into u32.
-                assert!(f.bits.len() + usize::from(f.mod_.extra_bits()) <= 32);
-                quote! { (#load_ts as u32) }
-            }
-            InstrField::Virtual(f) => f.expr.to_token_stream(),
-            InstrField::Reserved(_) => unreachable!("Can't load reserved"),
-        };
-
-        let ident = Ident::new(self.field.name().unwrap(), Span::call_site());
-        ts.extend(quote! {let #ident = #raw_load_ts; });
-
-        let cast_ts = self.as_field_type_ts(&ident);
-        let cast_ident = self.ident_print();
-        ts.extend(quote! {let #cast_ident = #cast_ts;});
-
-        self.is_valid_to_tokens(&cast_ident, ts);
     }
 }
 
@@ -383,19 +294,32 @@ enum PrintAs {
 }
 
 impl PrintAs {
+    fn additional_input_names(&self) -> Vec<String> {
+        match self {
+            PrintAs::PcRelOffset
+            | PrintAs::Imm(_)
+            | PrintAs::Dst(_)
+            | PrintAs::Id => vec![],
+            PrintAs::Src(_) => vec!["fau_page_index".into()],
+            PrintAs::Staging(s) => {
+                vec![s.count_id.to_string()]
+            }
+        }
+    }
+
     fn to_tokens(&self, ident: &Ident, ts: &mut TokenStream) {
         match &self {
-            PrintAs::Id => (),
+            PrintAs::Id => ts.extend(quote! {#ident}),
             PrintAs::Dst(is64) => {
                 ts.extend(quote! {
-                    let #ident = PrintDst { reg: (#ident as u8), is64: #is64 };
+                    PrintDst { reg: (#ident as u8), is64: #is64 }
                 });
             }
             PrintAs::Imm(t) => {
                 ts.extend(match t {
                     ImmType::V4I8 | ImmType::V2F16 | ImmType::V2I16 | // TODO Treat these correctly
                     ImmType::Float | ImmType::Uint | ImmType::Int => {
-                        quote! { let #ident = PrintImm{ val: #ident }; }
+                        quote! { PrintImm{ val: #ident } }
                     }
                 });
             }
@@ -406,26 +330,26 @@ impl PrintAs {
                     "SourceEncoding"
                 };
                 let cls_id = Ident::new(n, Span::call_site());
-                ts.extend(
-                    quote! { let #ident = #cls_id::<SmallConstantT, FauSpecialIndexPage>::try_decode(
-                        #ident as u8, arch, (fau_page_index as u8), ctx.fau32)?; }
-                );
+                ts.extend(quote! { #cls_id::try_decode(
+                #ident as u8, arch, (fau_page_index as u8), ctx.fau32)? });
             }
             PrintAs::Staging(s) => {
                 let count_id = &s.count_id;
                 let offset = s.offset;
                 ts.extend(quote! {
-                    assert!(#ident <= u8::MAX as u32);
-                    assert!(#count_id <= u8::MAX as u32);
-                    let #ident = PrintStaging {
-                        regs: (#ident as u8)..(
-                                  (#ident as u8) + (#count_id as u8) + #offset)
-                    };
+                    {
+                        assert!(#ident <= u8::MAX as u32);
+                        assert!(#count_id <= u8::MAX as u32);
+                        PrintStaging {
+                            regs: (#ident as u8)..(
+                                      (#ident as u8) + (#count_id as u8) + #offset)
+                        }
+                    }
                 });
             }
             PrintAs::PcRelOffset => {
-                ts.extend(quote!{
-                    let #ident = PrintPcRelOffset{ val: #ident, pc_base: ctx.pc_base };
+                ts.extend(quote! {
+                     PrintPcRelOffset{ val: #ident, pc_base: ctx.pc_base }
                 });
             }
         };
@@ -503,146 +427,63 @@ impl PrintAs {
     }
 }
 
-struct PrintField {
-    ident: Ident,
-    is_modifier: bool,
-    field_type: FieldType,
-    print_as: PrintAs,
-}
-
-impl PrintField {
-    fn new(
-        field: &LoadField,
-        is_modifier: bool,
-        print_type: PrintAs,
-    ) -> PrintField {
-        PrintField {
-            ident: field.ident_print(),
-            is_modifier,
-            field_type: field
-                .field
-                .field_type()
-                .cloned()
-                .unwrap_or(FieldType::Uint(32)),
-            print_as: print_type,
-        }
-    }
-
-    fn to_tokens(&self, fmt_prefix: &str, ts: &mut TokenStream) {
-        let mut fmt_str = String::from(fmt_prefix);
-
-        if self.is_modifier {
-            fmt_str += ".";
-        }
-
-        fmt_str += "{}";
-
-        let mut body_ts: TokenStream = Default::default();
-
-        self.print_as.to_tokens(&self.ident, &mut body_ts);
-
-        let ident = &self.ident;
-
-        body_ts.extend(quote! {
-            write!(f, #fmt_str, #ident)?;
-        });
-
-        // If the field is an enum with a "none" value, only print it if it isn't that.
-        match &self.field_type {
-            FieldType::Enum(enm) if enm.has_none => {
-                ts.extend(quote! {
-                    if !#ident.is_none() {
-                        #body_ts
-                    }
-                });
-            }
-            _ => ts.extend(body_ts),
-        }
-    }
-}
-
 struct InstrFields<'a> {
     instr: &'a Instr,
-    phy_loads: BTreeMap<String, LoadField<'a>>,
-    vir_loads: Vec<LoadField<'a>>,
+    loads: BTreeMap<String, (usize, LoadField)>,
 }
 
 impl<'a> InstrFields<'a> {
     pub fn new(instr: &Instr) -> InstrFields<'_> {
         InstrFields {
             instr,
-            phy_loads: Default::default(),
-            vir_loads: Default::default(),
+            loads: Default::default(),
         }
     }
 
-    pub fn load(&mut self, name: &str) -> &LoadField<'a> {
-        let field = self
-            .instr
-            .get_named_field(name)
-            .expect("modifier references non-existent field");
+    pub fn fields(&self) -> impl Iterator<Item = &LoadField> {
+        let mut sorted: Vec<_> = self.loads.values().collect();
+        sorted.sort_by_key(|(idx, _)| *idx);
+        sorted.into_iter().map(|(_, l)| l)
+    }
 
-        match field {
-            InstrField::Physical(f) => self
-                .phy_loads
-                .entry(f.name.clone())
-                .or_insert(LoadField::new(f.name.as_str(), self.instr)),
+    pub fn load(&mut self, name: &str) -> &mut LoadField {
+        let field = self.instr.get_named_field(name).unwrap();
+        let next_idx = self.loads.len();
+
+        let (_, ret) = match field {
+            InstrField::Physical(f) => {
+                self.loads.entry(f.name.clone()).or_insert((
+                    next_idx,
+                    LoadField::new(f.name.as_str(), self.instr),
+                ))
+            }
             InstrField::Virtual(f) => {
-                self.vir_loads
-                    .push(LoadField::new(f.name.as_str(), self.instr));
-                let load_idx = self.vir_loads.len() - 1;
+                self.loads.entry(f.name.clone()).or_insert((
+                    next_idx,
+                    LoadField::new(f.name.as_str(), self.instr),
+                ));
 
                 for used_field in &f.expr.fields() {
                     self.load(&used_field.name);
                 }
 
-                &self.vir_loads[load_idx]
+                self.loads.get_mut(&f.name).unwrap()
             }
             InstrField::Reserved(_) => unreachable!("Can't load reserved"),
-        }
+        };
+
+        ret
     }
-}
-
-impl ToTokens for InstrFields<'_> {
-    fn to_tokens(&self, ts: &mut TokenStream) {
-        self.phy_loads
-            .values()
-            .chain(self.vir_loads.iter())
-            .for_each(|l| l.to_tokens(ts));
-    }
-}
-
-fn unique_instr_ident(prefix: &str, instr: &Instr) -> Ident {
-    let variant = if let Some(var_name) = &instr.variant {
-        format!("_{}", var_name.to_lowercase())
-    } else {
-        String::from("")
-    };
-
-    Ident::new(
-        &format!(
-            "{}_{}{}_{}_{}",
-            prefix,
-            instr.name.to_lowercase(),
-            variant,
-            instr.arch.start,
-            instr.arch.end
-        ),
-        Span::call_site(),
-    )
 }
 
 struct InstrPrint<'a> {
     instr: &'a Instr,
     fields: InstrFields<'a>,
-    prints: Vec<PrintField>,
-    fn_ident: Ident,
 }
 
 impl InstrPrint<'_> {
     pub fn new(instr: &Instr) -> InstrPrint<'_> {
         let mut fields = InstrFields::new(instr);
-        let mut fragments: Vec<PrintField> = Default::default();
 
         // Collect all values needed for printing. This includes values that are
         // not directly printed, but used to compute printed virtual fields.
@@ -651,25 +492,20 @@ impl InstrPrint<'_> {
                 SyntaxElement::Name(n) => {
                     for mod_ in &n.mods {
                         let ld = fields.load(&mod_.name);
-                        let pfield = PrintField::new(ld, true, PrintAs::Id);
-                        fragments.push(pfield);
+                        ld.set_decode(PrintAs::Id, instr);
+                        ld.is_mod = true;
                     }
                 }
                 SyntaxElement::Staging(s) => {
                     let field = instr.get_sr_index_field(s.is_input).unwrap();
                     let print_as = PrintAsStaging::new(s.is_input, instr);
                     fields.load(&format!("{}", print_as.count_id));
-                    let ld =
-                        fields.load(&format!("{}", field.ident().unwrap()));
-                    let pf =
-                        PrintField::new(ld, false, PrintAs::Staging(print_as));
-                    fragments.push(pf);
+                    let ld = fields.load(&field.name().unwrap());
+                    ld.set_decode(PrintAs::Staging(print_as), instr);
                 }
                 SyntaxElement::Imm(s) => {
                     let ld = fields.load(&s.name);
-                    let print_as = PrintAs::Imm(s.type_.into());
-                    let pf = PrintField::new(ld, false, print_as);
-                    fragments.push(pf);
+                    ld.set_decode(PrintAs::Imm(s.type_.into()), instr);
                 }
                 SyntaxElement::Dst(d) => {
                     let fname = "dest_register_index";
@@ -678,61 +514,36 @@ impl InstrPrint<'_> {
                         Some("i64") | Some("u64") | Some("s64")
                     );
                     let ld = fields.load(fname);
-                    let pf = PrintField::new(ld, false, PrintAs::Dst(is64));
-                    fragments.push(pf);
+                    ld.set_decode(PrintAs::Dst(is64), instr);
 
                     for mod_ in &d.mods {
                         let ld = fields.load(&mod_.name);
-                        let pf = PrintField::new(ld, true, PrintAs::Id);
-                        fragments.push(pf);
+                        ld.set_decode(PrintAs::Id, instr);
+                        ld.is_mod = true;
                     }
                 }
                 SyntaxElement::PcRelOffset(o) => {
                     let ld = fields.load(&o.name);
-                    let pf = PrintField::new(ld, false, PrintAs::PcRelOffset);
-                    fragments.push(pf);
+                    ld.set_decode(PrintAs::PcRelOffset, instr);
                 }
                 SyntaxElement::Src(s) => {
                     let field = instr.get_named_field(&s.name).unwrap();
                     let is64 =
                         matches!(field.field_type(), Some(FieldType::Source64));
                     let ld = fields.load(&s.name);
-                    let pf = PrintField::new(ld, false, PrintAs::Src(is64));
-                    fragments.push(pf);
+                    ld.set_decode(PrintAs::Src(is64), instr);
                     fields.load("fau_page_index");
 
                     for mod_ in &s.mods {
                         let ld = fields.load(&mod_.name);
-                        let pf = PrintField::new(ld, true, PrintAs::Id);
-                        fragments.push(pf);
+                        ld.set_decode(PrintAs::Id, instr);
+                        ld.is_mod = true;
                     }
                 }
             }
         }
 
-        InstrPrint {
-            instr,
-            fields,
-            prints: fragments,
-            fn_ident: unique_instr_ident("print", instr),
-        }
-    }
-
-    pub fn dispatch_case_ts(&self) -> TokenStream {
-        let i = self.instr;
-
-        let arch_first = i.arch.start;
-        let arch_last = i.arch.end - 1;
-        let arch_guard = quote! {#arch_first..=#arch_last};
-
-        let ident = &self.fn_ident;
-        let mn = Ident::new(&i.name, Span::call_site());
-        if let Some(var_name) = &i.variant {
-            let vi = Ident::new(var_name, Span::call_site());
-            quote! { (M::#mn, Some(V::#vi), #arch_guard) => #ident(v, arch, f, ctx), }
-        } else {
-            quote! { (M::#mn, None, #arch_guard) => #ident(v, arch, f, ctx), }
-        }
+        InstrPrint { instr, fields }
     }
 
     pub fn declare_types(ts: &mut TokenStream) {
@@ -747,6 +558,15 @@ impl InstrPrint<'_> {
                 Fmt(std::fmt::Error),
                 Io(std::io::Error),
                 InvalidInstr(InvalidInstrError),
+            }
+
+            impl PrintError {
+                fn into_invalid_instr(self) -> InvalidInstrError {
+                    match self {
+                        PrintError::InvalidInstr(e) => e,
+                        _ => panic!("into_invalid_instr called on Fmt or Io"),
+                    }
+                }
             }
 
             impl From<std::convert::Infallible> for PrintError {
@@ -780,233 +600,414 @@ impl InstrPrint<'_> {
             }
         });
     }
-}
 
-impl ToTokens for InstrPrint<'_> {
-    fn to_tokens(&self, ts: &mut TokenStream) {
-        let display_name = self.instr.full_name();
+    fn table_entry(
+        &self,
+        fields: &mut BTreeMap<LoadField, usize>,
+    ) -> TokenStream {
+        let name = &self.instr.name;
+        let variant = match &self.instr.variant {
+            Some(v) => quote! {Some(#v)},
+            None => quote! {None},
+        };
 
-        let mut body_ts: TokenStream = Default::default();
-
-        self.fields.to_tokens(&mut body_ts);
-
-        // Name always comes first, ignore the order from the syntax elements.
-        body_ts.extend(quote! {write!(f, #display_name)?;});
-
-        // The first argument after the name and it's modifiers doesn't yet use
-        // ',' as a separator.
-        let mut had_non_mod = false;
-        for frag in self.prints.iter() {
-            let with_comma = had_non_mod && !frag.is_modifier;
-            let prefix = if frag.is_modifier {
-                ""
-            } else if with_comma {
-                ", "
-            } else {
-                " "
-            };
-            frag.to_tokens(prefix, &mut body_ts);
-            had_non_mod |= !frag.is_modifier;
+        let mut fields_ts: TokenStream = Default::default();
+        for load in self.fields.fields() {
+            let next_idx = fields.len();
+            let field_idx =
+                *fields.entry(load.clone()).or_insert(next_idx) as u32;
+            fields_ts.extend(quote! {#field_idx,});
         }
 
-        let ident = &self.fn_ident;
+        quote! {
+            Instr {
+                name: #name,
+                variant: #variant,
+                fields: &[#fields_ts],
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CmpTokenStream(TokenStream);
+
+impl From<TokenStream> for CmpTokenStream {
+    fn from(val: TokenStream) -> CmpTokenStream {
+        CmpTokenStream(val)
+    }
+}
+
+impl ToTokens for CmpTokenStream {
+    fn to_tokens(&self, ts: &mut TokenStream) {
+        self.0.to_tokens(ts);
+    }
+}
+
+impl Ord for CmpTokenStream {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        quote! {#self}.to_string().cmp(&quote! {#other}.to_string())
+    }
+}
+
+impl PartialOrd for CmpTokenStream {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for CmpTokenStream {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for CmpTokenStream {}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum LoadFn {
+    Physical {
+        start: u8,
+        end: u8,
+        mod_: FieldMod,
+    },
+    Virtual {
+        inputs: Vec<String>,
+        expr: CmpTokenStream,
+    },
+}
+
+impl LoadFn {
+    fn ident(&self) -> Ident {
+        match self {
+            LoadFn::Physical { start, end, mod_ } => {
+                let ident_mod = match mod_ {
+                    FieldMod::Shr(n) => format!("_sh{}", n),
+                    FieldMod::Minus(n) => format!("_mi{}", n),
+                    FieldMod::Align(n) => format!("_al{}", n),
+                    _ => "".into(),
+                };
+                Ident::new(
+                    &format!("load_{}_{}{}", start, end, ident_mod),
+                    Span::call_site(),
+                )
+            }
+            LoadFn::Virtual { expr, .. } => {
+                let mut s = std::hash::DefaultHasher::new();
+                expr.0.to_string().hash(&mut s);
+                let hash = s.finish();
+                Ident::new(&format!("expr_{:x}", hash), Span::call_site())
+            }
+        }
+    }
+
+    fn ref_ts(&self) -> TokenStream {
+        let id = self.ident();
+        match self {
+            LoadFn::Physical { .. } => {
+                quote! {LoadFn::Physical(#id)}
+            }
+            LoadFn::Virtual { .. } => {
+                quote! {LoadFn::Virtual(#id)}
+            }
+        }
+    }
+}
+
+impl From<&InstrField> for LoadFn {
+    fn from(value: &InstrField) -> Self {
+        match value {
+            InstrField::Physical(f) => LoadFn::Physical {
+                start: f.bits.start,
+                end: f.bits.end,
+                mod_: f.mod_,
+            },
+            InstrField::Virtual(f) => {
+                let mut inputs: Vec<String> = Default::default();
+                for field in f.expr.fields() {
+                    if inputs.contains(&field.name) {
+                        continue;
+                    }
+                    inputs.push(field.name.clone());
+                }
+                LoadFn::Virtual {
+                    inputs,
+                    expr: f.expr.to_token_stream().into(),
+                }
+            }
+            _ => unreachable!("Unexpected InstrField variant"),
+        }
+    }
+}
+
+impl ToTokens for LoadFn {
+    fn to_tokens(&self, ts: &mut TokenStream) {
+        match self {
+            LoadFn::Physical { start, end, mod_ } => {
+                let mask = bitmask(end - start);
+                let mut load_ts = quote! {((v >> #start) & #mask)};
+
+                load_ts = match mod_ {
+                    FieldMod::Shr(n) => quote! {(#load_ts << #n)},
+                    FieldMod::Minus(n) => quote! {(#load_ts + #n)},
+                    FieldMod::Align(_) | FieldMod::None => load_ts,
+                };
+
+                // All values we unpack will fit into u32.
+                assert!((end - start) + u8::from(mod_.extra_bits()) <= 32);
+
+                let ident = self.ident();
+                ts.extend(quote! {
+                    fn #ident (v: u64) -> u32 {
+                        #load_ts as u32
+                    }
+                });
+            }
+            LoadFn::Virtual { expr, inputs } => {
+                let ident = self.ident();
+                let mut load_ts = quote! {};
+                for name in inputs {
+                    let name_id = instr_field_ident(name);
+                    load_ts.extend(quote! {let #name_id = values[#name];});
+                }
+
+                ts.extend(quote! {
+                    fn #ident (values: &FxHashMap<&'static str, u32>, arch: u8)
+                        -> Result<u32, EncodeError> {
+                            #load_ts
+                            Ok((#expr) as u32)
+                    }
+                });
+            }
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Ord, PartialOrd, Clone)]
+struct DecodeFn {
+    ident: Ident,
+    body: String,
+}
+
+impl DecodeFn {
+    const DEFAULT_LOAD_TYPE: FieldType = FieldType::Uint(32);
+    fn new(field: &InstrField, print_as: Option<&PrintAs>) -> Self {
+        let field_type = field.field_type().unwrap_or(&Self::DEFAULT_LOAD_TYPE);
+
+        let mut ts: TokenStream = Default::default();
+
+        if let Some(print_as) = print_as {
+            for name in print_as.additional_input_names() {
+                let name_id = instr_field_ident(&name);
+                ts.extend(quote! {let #name_id = values[#name];});
+            }
+        }
+
+        let ident_in = Ident::new("val", Span::call_site());
+
+        // Cast to the actual type of the field.
+        let as_type = match field_type {
+            FieldType::Enum(e) => {
+                let ei = &e.ident;
+                // All enums implement TryDecode<u8>
+                quote! { #ei::try_decode((#ident_in) as u8, arch)? }
+            }
+            FieldType::Int(n) | FieldType::PcRelOffsetSigned(n) => {
+                // n == "physical size" + mod extra bits
+                // The mod has been reversed already, thus the "encoded" size
+                // here is exactly n.
+                quote! {sign_ext(#ident_in, #n)}
+            }
+            FieldType::Source
+            | FieldType::Source64
+            | FieldType::Uint(_)
+            | FieldType::PcRelOffsetUnsigned(_) => quote! {#ident_in},
+        };
+        ts.extend(quote! {let #ident_in = #as_type; });
+
+        // Check if in restricted set.
+        match (field_type, field.restrict()) {
+            (FieldType::Enum(e), Some(restrict)) => {
+                let ei = &e.ident;
+                let mut allowed: TokenStream = Default::default();
+
+                for allowed_value in &restrict.values {
+                    let ev = &allowed_value.value_ident;
+                    allowed.extend(quote! {#ei::#ev,});
+                }
+
+                ts.extend(quote! {if ! [#allowed].contains(&#ident_in) {
+                    return Err(InvalidInstrError::Any.into());
+                }});
+            }
+            _ => (),
+        };
+
+        let maybe_none = match field_type {
+            FieldType::Enum(enum_) => enum_.has_none,
+            _ => false,
+        };
+
+        if maybe_none {
+            ts.extend(quote! {if #ident_in.is_none() { return Ok(None); }});
+        }
+
+        if let Some(print_as) = print_as {
+            let mut as_print_type_ts: TokenStream = Default::default();
+            print_as.to_tokens(&ident_in, &mut as_print_type_ts);
+
+            ts.extend(quote! {Ok(Some(Box::new(#as_print_type_ts)))});
+        } else {
+            ts.extend(quote! {Ok(None)});
+        }
+
+        let body = ts.to_string();
+
+        let mut s = std::hash::DefaultHasher::new();
+        body.hash(&mut s);
+        let hash = s.finish();
+        let ident = Ident::new(&format!("dec_{:x}", hash), Span::call_site());
+
+        DecodeFn { ident, body }
+    }
+
+    fn ref_ts(&self) -> TokenStream {
+        let id = &self.ident;
+        quote! {#id}
+    }
+}
+
+impl ToTokens for DecodeFn {
+    fn to_tokens(&self, ts: &mut TokenStream) {
+        let body: TokenStream = self.body.parse().unwrap();
+        let ident = &self.ident;
+        let ret_type = quote! {DecodeResult<dyn std::fmt::Display>};
         ts.extend(quote! {
-            fn #ident (
-                v: u64, arch: u8, f: &mut impl std::io::Write, ctx: &PrintCtx
-            ) -> Result<(), PrintError> {
-                #body_ts
-                Ok(())
+            fn #ident (val: u32, values: &FxHashMap<&'static str, u32>,
+                arch: u8, ctx: &PrintCtx) -> #ret_type {
+                #body
             }
         });
     }
 }
 
-fn gen_print(instrs: &Vec<Instr>) -> TokenStream {
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct InstrKey {
+    name: String,
+    variant: Option<String>,
+    arch_from: u8,
+    arch_to: u8,
+}
+
+impl From<&Instr> for InstrKey {
+    fn from(value: &Instr) -> Self {
+        InstrKey {
+            name: value.name.clone(),
+            variant: value.variant.clone(),
+            arch_from: value.arch.start,
+            arch_to: value.arch.end,
+        }
+    }
+}
+
+fn gen_print(
+    instrs: &[Instr],
+    instr_to_idx: &mut BTreeMap<InstrKey, usize>,
+) -> TokenStream {
     let mut ts: TokenStream = Default::default();
-    let mut match_arms_ts: TokenStream = Default::default();
 
     InstrPrint::declare_types(&mut ts);
     PrintAs::declare_types(&mut ts);
 
-    for instr in instrs {
+    let mut fields = Default::default();
+    let mut instr_table_entries: TokenStream = Default::default();
+
+    for (table_idx, instr) in instrs.iter().enumerate() {
         let instr_print = InstrPrint::new(instr);
-        match_arms_ts.extend(instr_print.dispatch_case_ts());
-        instr_print.to_tokens(&mut ts);
+
+        let entry = instr_print.table_entry(&mut fields);
+        instr_table_entries.extend(quote! {#entry,});
+
+        instr_to_idx.insert(instr.into(), table_idx);
     }
 
-    ts.extend(quote! {
-        pub fn print(v: u64, mn: Mnemonic, var: Option<Variant>, arch: u8,
-                     f: &mut impl std::io::Write, ctx: &PrintCtx
-        ) -> std::io::Result<()> {
-            use Mnemonic as M;
-            use Variant as V;
-            let res = match (&mn, var, arch) {
-                #match_arms_ts
-                _ => write!(f, "<invalid input>").map_err(Into::into),
-            };
+    let mut load_functions: BTreeSet<LoadFn> = Default::default();
+    let mut decode_functions: BTreeSet<DecodeFn> = Default::default();
 
-            match (res) {
-                Err(PrintError::InvalidInstr(e)) => write!(f, "{}", e),
-                Err(PrintError::Fmt(e)) => write!(f, "<format error>"),
-                Err(PrintError::Io(e)) => Err(e),
-                Ok(()) => Ok(()),
-            }
-        }
+    let mut field_table_entries: TokenStream = Default::default();
+    let mut fields_sorted: Vec<_> = fields.iter().collect();
+    fields_sorted.sort_by_key(|(_, idx)| **idx);
+    for (field, _) in fields_sorted {
+        field.table_entry(&mut field_table_entries);
+
+        load_functions.insert(field.load_fn.clone());
+        decode_functions.insert(field.decode_fn.clone());
+    }
+
+    for f in load_functions {
+        f.to_tokens(&mut ts);
+    }
+
+    for f in decode_functions {
+        f.to_tokens(&mut ts);
+    }
+
+    let n_fields = fields.len();
+    ts.extend(quote! {
+        pub static FIELDS: [Field; #n_fields] = [#field_table_entries];
+    });
+
+    let n_instrs = instrs.len();
+    ts.extend(quote! {
+        pub static DISASM_TABLE: [Instr; #n_instrs] = [#instr_table_entries];
     });
 
     ts
 }
 
-struct SimpleEnum {
-    name: String,
-    values: Vec<String>,
-}
+fn gen_decode(
+    isa: &ISA,
+    instr_to_idx: &BTreeMap<InstrKey, usize>,
+) -> TokenStream {
+    let make_ret_val = |instr: &Instr| {
+        let idx = instr_to_idx.get(&instr.into()).unwrap();
+        quote! { #idx }
+    };
+    let mut ts: TokenStream = Default::default();
+    let mut arch_cases: TokenStream = Default::default();
 
-impl SimpleEnum {
-    pub fn new(name: &str, values: Vec<String>) -> SimpleEnum {
-        SimpleEnum {
-            name: String::from(name),
-            values: values,
-        }
-    }
-
-    pub fn ident(&self) -> Ident {
-        Ident::new(&self.name, Span::call_site())
-    }
-}
-
-impl ToTokens for SimpleEnum {
-    fn to_tokens(&self, ts: &mut TokenStream) {
-        let name_id = ident!("{}", &self.name);
-
-        let mut idents: Vec<Ident> =
-            self.values.iter().map(|n| ident!("{n}")).collect();
-        idents.sort();
-
-        let display_cases: Vec<TokenStream> = idents
-            .iter()
-            .zip(&self.values)
-            .map(|(i, s)| quote! {#name_id::#i => write!(f, #s)})
-            .collect();
-
-        ts.extend(quote! {
-            pub enum #name_id {
-                #(#idents),*
-            }
-
-            impl std::fmt::Display for #name_id {
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    match self {
-                        #(#display_cases),*
-                    }
-                }
-            }
-        })
-    }
-}
-
-struct TryDecodeInstr<'a> {
-    fn_ident: Ident,
-    fields: InstrFields<'a>,
-}
-
-impl TryDecodeInstr<'_> {
-    pub fn new(instr: &Instr) -> TryDecodeInstr<'_> {
-        let mut fields = InstrFields::new(instr);
-
-        for field in &instr.fields {
-            match field {
-                InstrField::Physical(f) => {
-                    fields.load(&f.name);
-                }
-                InstrField::Virtual(f) => {
-                    fields.load(&f.name);
-                }
-                InstrField::Reserved(_) => (),
-            }
-        }
-
-        TryDecodeInstr {
-            fields,
-            fn_ident: unique_instr_ident("try_dec", instr),
-        }
-    }
-}
-
-impl ToTokens for TryDecodeInstr<'_> {
-    fn to_tokens(&self, ts: &mut TokenStream) {
-        let mut loads_ts: TokenStream = Default::default();
-        self.fields.to_tokens(&mut loads_ts);
-
-        let fname = &self.fn_ident;
-        ts.extend(quote! {
-            fn #fname (v: u64, arch: u8) -> Result<(), InvalidInstrError> {
-                #loads_ts
-                Ok(())
-            }
-        });
-    }
-}
-
-fn gen_decode(isa: &ISA, name_e: Ident, var_e: Ident) -> TokenStream {
-    let mut decode_per_arch: BTreeMap<_, Box<DecoderNode>> = Default::default();
-
-    let mut try_decode_instr_impls: TokenStream = Default::default();
-    for instr in &isa.instrs {
-        let try_decode = TryDecodeInstr::new(instr);
-        try_decode.to_tokens(&mut try_decode_instr_impls);
-    }
-
-    for target_arch in isa.arch.clone() {
+    for arch in isa.arch.clone() {
         let instrs: Vec<&Instr> = isa
             .instrs
             .iter()
-            .filter(|i| i.arch.contains(&target_arch))
+            .filter(|i| i.arch.contains(&arch))
             .collect();
 
         let decoder = DecoderNode::build(instrs);
-        decode_per_arch.insert(target_arch, Box::new(decoder));
+        let stages = decoder.to_tokens(&make_ret_val);
+        let n_stages = stages.len();
+        let table_id = Ident::new(&format!("DECODE_{arch}"), Span::call_site());
+        ts.extend(quote! {
+            static #table_id: [DecodeStage; #n_stages] = [#(#stages)*];
+        });
+
+        arch_cases.extend(quote! {
+            #arch => try_decode_table(input_value, arch, &#table_id),
+        });
     }
 
-    let make_ret_val = |instr: &Instr| {
-        let name = Ident::new(&instr.name, Span::call_site());
-        if let Some(variant) = &instr.variant {
-            let vi = Ident::new(variant, Span::call_site());
-            quote! { (M::#name, Some(V::#vi)) }
-        } else {
-            quote! { (M::#name, None) }
-        }
-    };
+    ts.extend(quote! {
+      pub fn try_decode(
+          input_value: u64, arch: u8
+      ) -> Result<&'static Instr, InvalidInstrError> {
+          match arch {
+              #arch_cases
+              _ => Err(InvalidInstrError::Any),
+          }.map(|idx| &DISASM_TABLE[idx])
+      }
+    });
 
-    let make_check = |instr: &Instr| {
-        let fn_ident = unique_instr_ident("try_dec", instr);
-        quote! {#fn_ident(input_value, arch)}
-    };
-
-    let decoder_cases_ts: TokenStream = decode_per_arch
-        .iter()
-        .map(|(arch, decoder)| {
-            let per_arch = decoder.to_tokens(&make_ret_val, &make_check);
-            quote! {
-                #arch => #per_arch,
-            }
-        })
-        .collect();
-
-    quote! {
-        #try_decode_instr_impls
-
-        pub fn try_decode(
-            input_value: u64, arch: u8
-        ) -> Result<(Mnemonic, Option<Variant>), InvalidInstrError> {
-            use #name_e as M;
-            use #var_e as V;
-            match arch {
-                #decoder_cases_ts
-                _ => Err(InvalidInstrError::Any),
-            }
-        }
-    }
+    ts
 }
 
 pub fn gen_decoder(
@@ -1015,41 +1016,19 @@ pub fn gen_decoder(
 ) -> Result<TokenStream> {
     let isa = ISA::from_xml_file(std::fs::File::open(xml_file)?, arch)?;
 
-    let instr_names: HashSet<String> =
-        isa.instrs.iter().map(|i| i.name.clone()).collect();
-    let instr_variants: HashSet<String> = isa
-        .instrs
-        .iter()
-        .filter_map(|i| i.variant.clone())
-        .collect();
+    let mut instr_to_idx = Default::default();
+    let printer_ts = gen_print(&isa.instrs, &mut instr_to_idx);
 
-    let instr_name_enum =
-        SimpleEnum::new("Mnemonic", instr_names.into_iter().collect());
-    let instr_var_enum =
-        SimpleEnum::new("Variant", instr_variants.into_iter().collect());
-
-    let printer_ts = gen_print(&isa.instrs);
-    let decode_ts =
-        gen_decode(&isa, instr_name_enum.ident(), instr_var_enum.ident());
+    let decode_ts = gen_decode(&isa, &instr_to_idx);
 
     Ok(quote! {
-        pub mod decode {
-        use super::*;
-        use crate::isa::*;
-
         fn sign_ext(v: u32, enc_width: u8) -> i32 {
             let r = 32 - enc_width;
             ((v << r) as i32) >> r
         }
 
-        #instr_name_enum
-
-        #instr_var_enum
-
         #decode_ts
 
         #printer_ts
-
-        }
     })
 }

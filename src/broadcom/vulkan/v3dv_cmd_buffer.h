@@ -33,7 +33,6 @@
 #include "vk_command_pool.h"
 #include "vk_sync.h"
 #include "util/set.h"
-#include "util/perf/u_trace.h"
 
 struct v3dv_buffer;
 struct v3dv_descriptor_set;
@@ -290,10 +289,6 @@ struct v3dv_job {
 
    /* Perfmons with last job sync for CSD and CL jobs */
    struct v3dv_perf_query *perf;
-
-   /* tagging each job with a number for perfetto render stages */
-   uint32_t id;
-   struct v3dv_queue *queue;
 };
 
 void v3dv_job_init(struct v3dv_job *job,
@@ -314,7 +309,8 @@ void v3dv_job_start_frame(struct v3dv_job *job,
                           uint32_t render_target_count,
                           uint8_t max_internal_bpp,
                           uint8_t total_color_bpp,
-                          bool msaa);
+                          bool msaa,
+                          const VkExtent2D *tile_size);
 
 bool v3dv_job_type_is_gpu(struct v3dv_job *job);
 
@@ -420,7 +416,7 @@ struct v3dv_cmd_buffer_state {
    struct v3dv_render_pass dynamic_pass;
    struct v3dv_subpass dynamic_subpass;
    struct v3dv_render_pass_attachment dynamic_attachments[18 /* (8 color + D/S) x 2 (for resolves) */];
-   struct v3dv_subpass_attachment dynamic_subpass_attachments[18];
+   v3dv_subpass_attachment dynamic_subpass_attachments[18];
    struct v3dv_framebuffer *dynamic_framebuffer;
 
    VkRect2D render_area;
@@ -673,15 +669,6 @@ struct v3dv_cmd_buffer {
     * buffer via vkCmdExecuteCommands.
     */
    struct list_head jobs;
-
-   /* For vulkan perfetto render stages */
-   struct u_trace trace;
-   struct v3dv_job trace_marker_job;
-
-   /* Bitmask of v3dv_queue_type this cmd_buffer submitted jobs to, tracked
-    * for the cmdbuf trace marker's end-timestamp to wait on all of them.
-    */
-   uint8_t trace_queue_mask;
 };
 
 struct v3dv_job *v3dv_cmd_buffer_start_job(struct v3dv_cmd_buffer *cmd_buffer,

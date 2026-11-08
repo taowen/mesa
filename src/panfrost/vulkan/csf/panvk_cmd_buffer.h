@@ -251,7 +251,7 @@ enum panvk_sb_ids {
    PANVK_SB_DEFERRED_SYNC = 1,
    PANVK_SB_DEFERRED_FLUSH = 2,
    PANVK_SB_ITER_START = 3,
-   PANVK_SB_ITER_COUNT = 5,
+   PANVK_SB_ITER_COUNT = CS_MAX_SB_COUNT - PANVK_SB_ITER_START,
 };
 
 #define SB_IMM_MASK     0
@@ -566,6 +566,7 @@ struct panvk_cmd_buffer {
       struct panvk_cs_state cs[PANVK_SUBQUEUE_COUNT];
       struct panvk_tls_state tls;
       bool contains_timestamp_queries;
+      bool uses_poly_heap;
 
       struct panvk_cond_render_state cond_render;
    } state;
@@ -1000,6 +1001,8 @@ vk_stages_to_subqueue_mask(VkPipelineStageFlags2 vk_stages,
 
 void panvk_per_arch(emit_barrier)(struct panvk_cmd_buffer *cmdbuf,
                                   struct panvk_cs_deps deps);
+
+VkResult panvk_per_arch(cmd_init_poly_heap)(struct panvk_cmd_buffer *cmdbuf);
 
 #if PAN_ARCH >= 14
 static inline void

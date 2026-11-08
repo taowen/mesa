@@ -29,15 +29,6 @@
 
 #include "util/perf/cpu_trace.h"
 
-/* Default max size of the bo cache, in MB.
- *
- * This value comes from testing different Vulkan application. Greater values
- * didn't get any further performance benefit. This looks somewhat small, but
- * from testing those applications, the main consumer of the bo cache are
- * the bos used for the CLs, that are usually small.
- */
-#define DEFAULT_MAX_BO_CACHE_SIZE 64
-
 /* Discarded to use a V3D_DEBUG for this, as it would mean adding a run-time
  * check for most of the calls
  */
@@ -259,11 +250,12 @@ v3dv_bo_alloc(struct v3dv_device *device,
          bo->report_obj_type = obj_type;
          bo->report_obj_handle = obj_handle;
          bo->report_id = (report_id << 32) | bo->handle;
-         v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
-                                       true, /* is_alloc */
-                                       false, /* is_import */
-                                       bo->report_id, bo->size,
-                                       obj_type, obj_handle);
+         vk_device_memory_report_emit(&device->vk, VK_SUCCESS,
+                                      true, /* is_alloc */
+                                      false, /* is_import */
+                                      bo->report_id, bo->size,
+                                      obj_type, obj_handle,
+                                      0 /* heap_index */);
          return bo;
       }
    }
@@ -283,11 +275,12 @@ retry:
       }
 
       mesa_loge("Failed to allocate device memory for BO\n");
-      v3dv_emit_device_memory_report(&device->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                                     true, /* is_alloc */
-                                     false, /* is_import */
-                                     0, /* mem_obj_id */
-                                     size, obj_type, obj_handle);
+      vk_device_memory_report_emit(&device->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                                   true, /* is_alloc */
+                                   false, /* is_import */
+                                   0, /* mem_obj_id */
+                                   size, obj_type, obj_handle,
+                                   0 /* heap_index */);
       return NULL;
    }
 
@@ -315,11 +308,12 @@ retry:
       bo_dump_stats(device);
    }
 
-   v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
-                                  true, /* is_alloc */
-                                  false, /* is_import */
-                                  report_id, bo->size,
-                                  obj_type, obj_handle);
+   vk_device_memory_report_emit(&device->vk, VK_SUCCESS,
+                                true, /* is_alloc */
+                                false, /* is_import */
+                                report_id, bo->size,
+                                obj_type, obj_handle,
+                                0 /* heap_index */);
    return bo;
 }
 
@@ -457,7 +451,7 @@ v3dv_bo_cache_init(struct v3dv_device *device)
 
    const char *max_cache_size_str = os_get_option("V3DV_MAX_BO_CACHE_SIZE");
    if (max_cache_size_str == NULL)
-      device->bo_cache.max_cache_size = DEFAULT_MAX_BO_CACHE_SIZE;
+      device->bo_cache.max_cache_size = V3D_DEFAULT_MAX_BO_CACHE_SIZE;
    else
       device->bo_cache.max_cache_size = atoll(max_cache_size_str);
 
@@ -533,10 +527,11 @@ v3dv_bo_free(struct v3dv_device *device,
     */
    mem_report_obj_handle = mem_report_obj_handle ?
                            mem_report_obj_handle : bo->report_obj_handle;
-   v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
-                                  false, /* is_alloc */
-                                  bo->is_import, bo->report_id, bo->size,
-                                  bo->report_obj_type, mem_report_obj_handle);
+   vk_device_memory_report_emit(&device->vk, VK_SUCCESS,
+                                false, /* is_alloc */
+                                bo->is_import, bo->report_id, bo->size,
+                                bo->report_obj_type, mem_report_obj_handle,
+                                0 /* heap_index */);
 
    if (!p_atomic_dec_zero(&bo->refcnt))
       return true;

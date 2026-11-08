@@ -725,6 +725,23 @@ num_encoded_alu_operands(const aco_ptr<Instruction>& instr)
    return 0;
 }
 
+bool
+instr_overwrites(Instruction* instr, PhysReg reg, unsigned size)
+{
+   for (Definition def : instr->definitions) {
+      if (def.physReg() + def.size() > reg && reg + size > def.physReg())
+         return true;
+   }
+   if (instr->isPseudo() && instr->pseudo().needs_scratch_reg) {
+      PhysReg scratch_reg = instr->pseudo().scratch_sgpr;
+      if (scratch_reg >= reg && reg + size > scratch_reg)
+         return true;
+   }
+   if (instr->isCall())
+      return true;
+   return false;
+}
+
 void
 try_reassign_split_vector(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
 {
@@ -807,10 +824,18 @@ try_reassign_split_vector(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
             continue;
          }
 
-         /* Don't propagate misaligned SGPRs.
-          * Note: No ALU instruction can take a variable larger than 64bit.
-          */
+         /* Don't propagate misaligned SGPRs. */
          if (op.regClass() == s2 && reg.reg() % 2 != 0)
+            break;
+         if (op.regClass().type() == RegType::sgpr && op.size() >= 3 && reg.reg() % 4 != 0)
+            break;
+
+         /* WMMA accumulators aren't late kill, but they can't partially overlap. */
+         bool late_kill =
+            op.isLateKill() || (instr_info.classes[(int)instr->opcode] == instr_class::wmma &&
+                                i == 2 && instr->definitions[0].physReg() != reg);
+
+         if (late_kill && instr_overwrites(instr.get(), reg, op.size()))
             break;
 
          /* Sub dword operands might need updates to SDWA/opsel,
@@ -826,30 +851,13 @@ try_reassign_split_vector(pr_opt_ctx& ctx, aco_ptr<Instruction>& instr)
 
          /* Use the p_split_vector operand register directly.
           *
-          * Note: this might violate register assignment rules to some extend
+          * Note: this might violate register assignment rules to some extent
           *       in case the definition does not get recolored, eventually.
           */
          instr->operands[i].setFixed(reg);
          break;
       }
    }
-}
-
-bool
-instr_overwrites(Instruction* instr, PhysReg reg, unsigned size)
-{
-   for (Definition def : instr->definitions) {
-      if (def.physReg() + def.size() > reg && reg + size > def.physReg())
-         return true;
-   }
-   if (instr->isPseudo() && instr->pseudo().needs_scratch_reg) {
-      PhysReg scratch_reg = instr->pseudo().scratch_sgpr;
-      if (scratch_reg >= reg && reg + size > scratch_reg)
-         return true;
-   }
-   if (instr->isCall())
-      return true;
-   return false;
 }
 
 bool
@@ -964,6 +972,20 @@ is_nop_copy(Instruction* instr)
 }
 
 bool
+can_rewrite_def(pr_opt_ctx& ctx, Instruction* instr, unsigned def_idx, PhysReg reg)
+{
+   if (reg == m0 && !can_write_m0(instr))
+      return false;
+
+   const aco_alu_opcode_info& opcode_info = instr_info.alu_opcode_infos[(int)instr->opcode];
+   fixed_reg fixed = opcode_info.get_def_fixed_reg(instr, ctx.program->gfx_level, def_idx);
+   if (fixed != not_fixed && reg != instr->definitions[def_idx].physReg())
+      return false;
+
+   return def_idx >= get_tied_defs(instr).size();
+}
+
+bool
 try_optimize_branching_sequence(pr_opt_ctx& ctx, aco_ptr<Instruction>& exec_copy)
 {
    /* Try to optimize the branching sequence at the end of a block.
@@ -1068,10 +1090,12 @@ try_optimize_branching_sequence(pr_opt_ctx& ctx, aco_ptr<Instruction>& exec_copy
     * Note, VOPC implicitly contains "& exec" because it yields zero on inactive lanes.
     * Additionally, when value is copied as-is, also allow SALU and parallelcopies.
     */
-   const bool can_reassign =
+   bool can_reassign =
       vopc || (exec_copy->opcode == aco_opcode::p_parallelcopy &&
                (exec_val->isSALU() || exec_val->opcode == aco_opcode::p_parallelcopy ||
                 exec_val->opcode == aco_opcode::p_create_vector));
+
+   can_reassign &= vopc || can_rewrite_def(ctx, exec_val, 0, exec);
 
    /* The reassignment is not worth it when both the original exec needs to be copied
     * and the new exec copy can't be removed. In this case we'd end up with more instructions.
@@ -1182,13 +1206,13 @@ try_optimize_branching_sequence(pr_opt_ctx& ctx, aco_ptr<Instruction>& exec_copy
    if (can_remove_copy) {
       /* Remove the copy. */
       exec_copy.reset();
-      ctx.uses[exec_temp.id()]--;
    } else {
       /* Reassign the copy to write the register of the original value. */
       exec_copy.reset(create_instruction(aco_opcode::p_parallelcopy, Format::PSEUDO, 1, 1));
       exec_copy->definitions[0] = exec_wr_def;
       exec_copy->operands[0] = Operand(exec, ctx.program->lane_mask);
    }
+   ctx.uses[exec_temp.id()]--;
 
    if (save_original_exec) {
       /* Insert a new instruction that saves the original exec before it is overwritten.

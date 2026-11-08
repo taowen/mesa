@@ -48,7 +48,7 @@ radv_create_buffer(struct radv_device *device, const VkBufferCreateInfo *pCreate
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    /* reject buffers that are larger than maxBufferSize on Android, which
     * might not have VK_KHR_maintenance4
     */
@@ -185,8 +185,7 @@ radv_get_buffer_memory_requirements(struct radv_device *device, VkDeviceSize siz
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
-   pMemoryRequirements->memoryRequirements.memoryTypeBits =
-      ((1u << pdev->memory_properties.memoryTypeCount) - 1u) & ~pdev->memory_types_32bit;
+   pMemoryRequirements->memoryRequirements.memoryTypeBits = device->memory_types_allowed;
 
    /* Force 32-bit address-space for descriptor buffers usage because they are passed to shaders
     * through 32-bit pointers.
@@ -194,7 +193,9 @@ radv_get_buffer_memory_requirements(struct radv_device *device, VkDeviceSize siz
    if (usage &
        (VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT | VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT |
         VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT | VK_BUFFER_USAGE_2_DESCRIPTOR_HEAP_BIT_EXT))
-      pMemoryRequirements->memoryRequirements.memoryTypeBits = pdev->memory_types_32bit;
+      pMemoryRequirements->memoryRequirements.memoryTypeBits &= pdev->memory_types_32bit;
+   else
+      pMemoryRequirements->memoryRequirements.memoryTypeBits &= ~pdev->memory_types_32bit;
 
    if (flags & VK_BUFFER_CREATE_PROTECTED_BIT)
       pMemoryRequirements->memoryRequirements.memoryTypeBits &= pdev->memory_types_protected;
@@ -246,7 +247,10 @@ VKAPI_ATTR uint64_t VKAPI_CALL
 radv_GetBufferOpaqueCaptureAddress(VkDevice device, const VkBufferDeviceAddressInfo *pInfo)
 {
    VK_FROM_HANDLE(radv_buffer, buffer, pInfo->buffer);
-   return buffer->vk.device_address;
+   if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)
+      return buffer->vk.device_address;
+   else
+      return 0;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -255,7 +259,10 @@ radv_GetBufferOpaqueCaptureDescriptorDataEXT(VkDevice device, const VkBufferCapt
 {
    VK_FROM_HANDLE(radv_buffer, buffer, pInfo->buffer);
 
-   *((uint64_t *)pData) = buffer->vk.device_address;
+   if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)
+      memcpy(pData, &buffer->vk.device_address, sizeof(buffer->vk.device_address));
+   else
+      memset(pData, 0, sizeof(buffer->vk.device_address));
    return VK_SUCCESS;
 }
 
@@ -341,7 +348,7 @@ radv_bo_from_fd(struct radv_device *device, int fd, unsigned priority, struct ra
    if (result != VK_SUCCESS)
       return result;
 
-   vk_address_binding_report(&instance->vk, &mem->base, radv_buffer_get_va(mem->bo), mem->bo->size,
+   vk_address_binding_report(&instance->vk, &mem->vk.base, radv_buffer_get_va(mem->bo), mem->bo->size,
                              VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
 
    return result;
@@ -360,7 +367,7 @@ radv_bo_from_ptr(struct radv_device *device, void *host_ptr, uint64_t alloc_size
    if (result != VK_SUCCESS)
       return result;
 
-   vk_address_binding_report(&instance->vk, &mem->base, radv_buffer_get_va(mem->bo), mem->bo->size,
+   vk_address_binding_report(&instance->vk, &mem->vk.base, radv_buffer_get_va(mem->bo), mem->bo->size,
                              VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
 
    return result;

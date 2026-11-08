@@ -120,7 +120,7 @@ vc4_create_rasterizer_state(struct pipe_context *pctx,
                 so->config_bits[0] |= VC4_CONFIG_BITS_ENABLE_DEPTH_OFFSET;
 
                 depth_offset.depth_offset_units =
-                        float_to_187_half(cso->offset_units);
+                        float_to_187_half(cso->offset_units * 2.0);
                 depth_offset.depth_offset_factor =
                         float_to_187_half(cso->offset_scale);
         }

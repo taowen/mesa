@@ -12,6 +12,7 @@
 
 #include "nir/nir_builder.h"
 #include "nir/nir_lower_blend.h"
+#include "nir/nir_xfb_info.h"
 #include "pco.h"
 #include "pco_internal.h"
 #include "pvr_limits.h"
@@ -39,12 +40,12 @@ static const struct spirv_to_nir_options spirv_options = {
 /** NIR options. */
 static const nir_shader_compiler_options nir_options = {
    .discard_is_demote = true,
+   .has_imad32 = true,
    .float_mul_add32 = nir_float_muladd_support_has_ffma |
                       nir_float_muladd_support_fuse,
 
    .has_f2i32_rtne = true,
    .has_fused_comp_and_csel = true,
-   .has_tanh = true,
 
    .instance_id_includes_base_index = true,
 
@@ -250,7 +251,12 @@ static bool gather_fs_data_pass(struct nir_builder *b,
    }
 
    case nir_intrinsic_load_blend_const_color_rgba:
-      data->fs.blend_consts_needed |= PIPE_MASK_RGBA;
+   case nir_intrinsic_load_blend_const_color_r_float:
+   case nir_intrinsic_load_blend_const_color_g_float:
+   case nir_intrinsic_load_blend_const_color_b_float:
+   case nir_intrinsic_load_blend_const_color_a_float:
+      data->fs.blend_consts_needed |=
+         pco_nir_blend_load_to_mask(intr->intrinsic);
       break;
 
    case nir_intrinsic_load_front_face_op_pco:
@@ -292,6 +298,20 @@ static void gather_fs_data(nir_shader *nir, pco_data *data)
    data->fs.uses.sample_shading |= data->fs.uses.sample_locations;
 }
 
+static void gather_vs_xfb_data(nir_shader *nir, pco_vs_data *vs_data)
+{
+   if (nir->info.internal)
+      return;
+
+   nir_gather_xfb_info_from_intrinsics(nir);
+   if (!nir->xfb_info)
+      return;
+
+   unsigned xfb_info_size = nir_xfb_info_size(nir->xfb_info->output_count);
+   vs_data->xfb_info = rzalloc_size(NULL, xfb_info_size);
+   memcpy(vs_data->xfb_info, nir->xfb_info, xfb_info_size);
+}
+
 /**
  * \brief Gathers vertex shader data.
  *
@@ -301,6 +321,7 @@ static void gather_fs_data(nir_shader *nir, pco_data *data)
 static void gather_vs_data(nir_shader *nir, pco_data *data)
 {
    pco_vs_data *vs_data = &data->vs;
+   gather_vs_xfb_data(nir, vs_data);
 
    vs_data->clip_count = nir->info.clip_distance_array_size;
    vs_data->cull_count = nir->info.cull_distance_array_size;
@@ -430,6 +451,7 @@ static inline bool is_inline_ubo(unsigned desc_set,
                                  unsigned binding,
                                  const pco_common_data *common)
 {
+   assert(desc_set < ARRAY_SIZE(common->desc_sets));
    const pco_descriptor_set_data *desc_set_data = &common->desc_sets[desc_set];
    assert(desc_set_data->bindings && binding < desc_set_data->binding_count);
 
@@ -530,7 +552,7 @@ static void pco_nir_opt(pco_ctx *ctx, nir_shader *nir, pco_data *data, bool alge
 
       NIR_PASS(progress, nir, nir_opt_phi_precision);
       NIR_PASS(progress, nir, nir_lower_alu);
-      NIR_PASS(progress, nir, pco_nir_lower_alu, ctx);
+      NIR_PASS(progress, nir, pco_nir_lower_alu);
       NIR_PASS(progress, nir, nir_lower_pack);
 
       if (algebraic) {
@@ -904,6 +926,9 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 {
    bool internal = nir->info.internal;
 
+   if (nir->info.stage == MESA_SHADER_VERTEX && nir->xfb_info)
+      pco_nir_link_clip_cull_vars(nir, NULL);
+
    NIR_PASS(_,
             nir,
             nir_opt_access,
@@ -1053,6 +1078,10 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
       NIR_PASS(_, nir, nir_lower_is_helper_invocation);
       NIR_PASS(_, nir, pco_nir_lower_fs_intrinsics);
    } else if (nir->info.stage == MESA_SHADER_VERTEX) {
+      /* If needed, duplicate the point size for xfb prior to it being clamped.
+       */
+      NIR_PASS(_, nir, pco_nir_point_size_xfb);
+
       NIR_PASS(_,
                nir,
                nir_lower_point_size,
@@ -1205,6 +1234,8 @@ void pco_postprocess_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
       NIR_PASS(_, nir, nir_opt_dce);
       NIR_PASS(_, nir, nir_opt_cse);
    } while (progress);
+
+   NIR_PASS(_, nir, nir_opt_uadd_carry, 32);
 
    pco_nir_opt(ctx, nir, data, false);
 

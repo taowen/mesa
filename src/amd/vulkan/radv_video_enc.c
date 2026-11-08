@@ -649,8 +649,8 @@ radv_enc_slice_control(struct radv_cmd_buffer *cmd_buffer, const struct VkVideoE
    }
 
    RADEON_ENC_BEGIN(pdev->vcn_enc_cmds.slice_control_h264);
-   RADEON_ENC_CS(slice_control_mode);                        // slice control mode
-   RADEON_ENC_CS(num_mbs_in_slice);                          // num mbs per slice
+   RADEON_ENC_CS(slice_control_mode); // slice control mode
+   RADEON_ENC_CS(num_mbs_in_slice);   // num mbs per slice
    RADEON_ENC_END();
 }
 
@@ -1817,9 +1817,8 @@ radv_enc_ctx2(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *in
       RADEON_ENC_CS(0);
       RADEON_ENC_CS(0);
       RADEON_ENC_CS(0);
-      RADEON_ENC_CS(pdev->info.gfx_level >= GFX12 ?
-                    RENCODE_REC_SWIZZLE_MODE_256B_D_GFX12 :
-                    RENCODE_REC_SWIZZLE_MODE_256B_D);
+      RADEON_ENC_CS(pdev->info.gfx_level >= GFX12 ? RENCODE_REC_SWIZZLE_MODE_256B_D_GFX12
+                                                  : RENCODE_REC_SWIZZLE_MODE_256B_D);
       RADEON_ENC_CS(fcb_va >> 32);
       RADEON_ENC_CS(fcb_va & 0xffffffff);
       RADEON_ENC_CS(RENCODE_MAX_METADATA_BUFFER_SIZE_PER_FRAME); // colloc/cdf offset
@@ -1869,7 +1868,7 @@ radv_enc_feedback(struct radv_cmd_buffer *cmd_buffer, uint64_t feedback_query_va
    RADEON_ENC_CS(RENCODE_FEEDBACK_BUFFER_MODE_LINEAR);
    RADEON_ENC_CS(feedback_query_va >> 32);
    RADEON_ENC_CS(feedback_query_va & 0xffffffff);
-   RADEON_ENC_CS(16); // buffer_size
+   RADEON_ENC_CS(16);                                                  // buffer_size
    RADEON_ENC_CS(RADV_ENC_FEEDBACK_PARTITION_SIZE * sizeof(uint32_t)); // data_size
    RADEON_ENC_END();
 }
@@ -1945,7 +1944,8 @@ radv_enc_qp_map_input(struct radv_cmd_buffer *cmd_buffer, const struct VkVideoEn
    if (!(enc_info->flags & VK_VIDEO_ENCODE_WITH_QUANTIZATION_DELTA_MAP_BIT_KHR) || !qp_map)
       return;
 
-   const uint64_t va_in = qp_map->bindings[0].addr;
+   const uint64_t va_in = qp_map->bindings[0].addr + qp_map->planes[0].surface.u.gfx9.surf_offset +
+                          qp_map_view->vk.base_array_layer * qp_map->planes[0].surface.u.gfx9.surf_slice_size;
    radv_cs_add_buffer(device->ws, cs->b, qp_map->bindings[0].bo);
 
    const uint64_t va_out =
@@ -2002,7 +2002,8 @@ radv_enc_qp_map(struct radv_cmd_buffer *cmd_buffer, const struct VkVideoEncodeIn
          const uint32_t qp_map_type =
             rc_method == RENCODE_RATE_CONTROL_METHOD_NONE ? RENCODE_QP_MAP_TYPE_DELTA : RENCODE_QP_MAP_TYPE_MAP_PA;
          radv_cs_add_buffer(device->ws, cmd_buffer->cs->b, qp_map->bindings[0].bo);
-         const uint64_t va = qp_map->bindings[0].addr;
+         const uint64_t va = qp_map->bindings[0].addr + qp_map->planes[0].surface.u.gfx9.surf_offset +
+                             qp_map_view->vk.base_array_layer * qp_map->planes[0].surface.u.gfx9.surf_slice_size;
          RADEON_ENC_CS(qp_map_type);
          RADEON_ENC_CS(va >> 32);
          RADEON_ENC_CS(va & 0xffffffff);
@@ -2109,7 +2110,7 @@ radv_enc_params(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *
                       array_idx * src_img->planes[0].surface.u.gfx9.surf_slice_size;
    uint64_t chroma_va = src_img->plane_count > 1 ? (va + src_img->planes[1].surface.u.gfx9.surf_offset +
                                                     array_idx * src_img->planes[1].surface.u.gfx9.surf_slice_size)
-                                                  : 0;
+                                                 : 0;
    uint32_t pic_type;
    unsigned int slot_idx = 0xffffffff;
    unsigned int max_layers = cmd_buffer->video.enc.rate_control_num_layers;
@@ -2165,9 +2166,9 @@ radv_enc_params(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *
    RADEON_ENC_CS(luma_va & 0xffffffff);
    RADEON_ENC_CS(chroma_va >> 32);
    RADEON_ENC_CS(chroma_va & 0xffffffff);
-   RADEON_ENC_CS(src_img->planes[0].surface.u.gfx9.surf_pitch);   // luma pitch
+   RADEON_ENC_CS(src_img->planes[0].surface.u.gfx9.surf_pitch);                                // luma pitch
    RADEON_ENC_CS(src_img->plane_count > 1 ? src_img->planes[1].surface.u.gfx9.surf_pitch : 0); // chroma pitch
-   RADEON_ENC_CS(src_img->planes[0].surface.u.gfx9.swizzle_mode); // swizzle mode
+   RADEON_ENC_CS(src_img->planes[0].surface.u.gfx9.swizzle_mode);                              // swizzle mode
 
    if (pdev->enc_hw_ver < RADV_VIDEO_ENC_HW_5)
       RADEON_ENC_CS(slot_idx); // ref0_idx
@@ -2280,9 +2281,9 @@ radv_enc_params_h264(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfo
       RADEON_ENC_CS(slot_idx_0[0]); // ref_list0[0]
       RADEON_ENC_CS(slot_idx_0[1]); // ref_list0[1]
       for (int i = 2; i < RENCODE_H264_MAX_REFERENCE_LIST_SIZE; i++)
-         RADEON_ENC_CS(0);                             // ref_list0[i]
-      RADEON_ENC_CS(num_active_l0_refs);               // num_active_references_l0
-      RADEON_ENC_CS(slot_idx_1);                       // ref_list1[0]
+         RADEON_ENC_CS(0);               // ref_list0[i]
+      RADEON_ENC_CS(num_active_l0_refs); // num_active_references_l0
+      RADEON_ENC_CS(slot_idx_1);         // ref_list1[0]
       for (int i = 1; i < RENCODE_H264_MAX_REFERENCE_LIST_SIZE; i++)
          RADEON_ENC_CS(0);
       RADEON_ENC_CS(slot_idx_1 != 0xffffffff ? 1 : 0); // num_active_references_l1
@@ -2486,13 +2487,13 @@ radv_enc_input_format(struct radv_cmd_buffer *cmd_buffer)
       color_volume = radv_get_encode_color_volume(vid->vk.rgb_conv.rgb_model);
 
    RADEON_ENC_BEGIN(pdev->vcn_enc_cmds.input_format);
-   RADEON_ENC_CS(color_volume);               // input color volume
-   RADEON_ENC_CS(color_space);                // input color space
-   RADEON_ENC_CS(0);                          // input color range (ignored)
-   RADEON_ENC_CS(chroma_subsampling);         // input chroma subsampling
-   RADEON_ENC_CS(0);                          // input chroma location (ignored for RGB)
-   RADEON_ENC_CS(color_bit_depth);            // input color bit depth
-   RADEON_ENC_CS(color_packing_format);       // input color packing format
+   RADEON_ENC_CS(color_volume);         // input color volume
+   RADEON_ENC_CS(color_space);          // input color space
+   RADEON_ENC_CS(0);                    // input color range (ignored)
+   RADEON_ENC_CS(chroma_subsampling);   // input chroma subsampling
+   RADEON_ENC_CS(0);                    // input chroma location (ignored for RGB)
+   RADEON_ENC_CS(color_bit_depth);      // input color bit depth
+   RADEON_ENC_CS(color_packing_format); // input color packing format
    RADEON_ENC_END();
 }
 
@@ -3563,6 +3564,7 @@ radv_GetEncodedVideoSessionParametersKHR(VkDevice device,
          const StdVideoH264SequenceParameterSet *sps = vk_video_find_h264_enc_std_sps(templ, h264_get_info->stdSPSId);
          assert(sps);
          vk_video_encode_h264_sps(sps, size_limit, &sps_size, pData);
+         size_limit = size_limit > sps_size ? size_limit - sps_size : 0;
          if (h264_feedback_info)
             h264_feedback_info->hasStdSPSOverrides = VK_FALSE;
       }
@@ -3590,6 +3592,7 @@ radv_GetEncodedVideoSessionParametersKHR(VkDevice device,
          const StdVideoH265VideoParameterSet *vps = vk_video_find_h265_enc_std_vps(templ, h265_get_info->stdVPSId);
          assert(vps);
          vk_video_encode_h265_vps(vps, size_limit, &vps_size, pData);
+         size_limit = size_limit > vps_size ? size_limit - vps_size : 0;
          if (h265_feedback_info)
             h265_feedback_info->hasStdVPSOverrides = VK_FALSE;
       }
@@ -3598,6 +3601,7 @@ radv_GetEncodedVideoSessionParametersKHR(VkDevice device,
          assert(sps);
          char *data_ptr = pData ? (char *)pData + vps_size : NULL;
          vk_video_encode_h265_sps(sps, size_limit, &sps_size, data_ptr);
+         size_limit = size_limit > sps_size ? size_limit - sps_size : 0;
          if (h265_feedback_info)
             h265_feedback_info->hasStdSPSOverrides = VK_TRUE;
          has_overrides = VK_TRUE;
@@ -3626,6 +3630,11 @@ radv_GetEncodedVideoSessionParametersKHR(VkDevice device,
    if (pFeedbackInfo)
       pFeedbackInfo->hasOverrides = has_overrides;
 
+   if (pData && *pDataSize < total_size) {
+      *pDataSize = 0;
+      return VK_INCOMPLETE;
+   }
+
    *pDataSize = total_size;
    return VK_SUCCESS;
 }
@@ -3638,7 +3647,7 @@ radv_video_get_encode_session_memory_requirements(struct radv_device *device, st
                                                   VkVideoSessionMemoryRequirementsKHR *pMemoryRequirements)
 {
    struct radv_physical_device *pdev = radv_device_physical(device);
-   uint32_t memory_type_bits = (1u << pdev->memory_properties.memoryTypeCount) - 1;
+   uint32_t memory_type_bits = device->memory_types_allowed;
 
    VK_OUTARRAY_MAKE_TYPED(VkVideoSessionMemoryRequirementsKHR, out, pMemoryRequirements, pMemoryRequirementsCount);
 
@@ -3656,10 +3665,11 @@ radv_video_get_encode_session_memory_requirements(struct radv_device *device, st
          m->memoryBindIndex = RADV_BIND_ENCODE_AV1_CDF_STORE;
          m->memoryRequirements.size = VCN_ENC_AV1_DEFAULT_CDF_SIZE;
          m->memoryRequirements.alignment = 0;
-         m->memoryRequirements.memoryTypeBits = 0;
+         m->memoryRequirements.memoryTypeBits = memory_type_bits;
+
          for (unsigned i = 0; i < pdev->memory_properties.memoryTypeCount; i++)
-            if (pdev->memory_properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
-               m->memoryRequirements.memoryTypeBits |= (1 << i);
+            if (!(pdev->memory_properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+               m->memoryRequirements.memoryTypeBits &= ~(1u << i);
       }
    }
 
@@ -3689,7 +3699,7 @@ radv_video_get_encode_session_memory_requirements(struct radv_device *device, st
       vk_outarray_append_typed(VkVideoSessionMemoryRequirementsKHR, &out, m)
       {
          m->memoryBindIndex = RADV_BIND_ENCODE_QP_MAP;
-         m->memoryRequirements.size = map_width * map_height * sizeof(int16_t);
+         m->memoryRequirements.size = ALIGN_POT(map_width, 2) * map_height * sizeof(int16_t);
          m->memoryRequirements.alignment = 0;
          m->memoryRequirements.memoryTypeBits = memory_type_bits;
       }

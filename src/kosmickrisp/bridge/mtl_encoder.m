@@ -264,6 +264,16 @@ mtl_dispatch_threadgroups_with_indirect_buffer(mtl_compute_encoder *encoder,
    }
 }
 
+void
+mtl_dispatch_threads_with_indirect_buffer(mtl_compute_encoder *encoder,
+                                          uint64_t addr)
+{
+   @autoreleasepool {
+      id<MTL4ComputeCommandEncoder> enc = (id<MTL4ComputeCommandEncoder>)encoder;
+      [enc dispatchThreadsWithIndirectBuffer:addr];
+   }
+}
+
 /* MTLRenderEncoder */
 
 /* Encoder commands */

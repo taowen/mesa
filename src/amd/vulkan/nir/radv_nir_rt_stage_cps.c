@@ -489,10 +489,9 @@ lower_rt_derefs_cps(nir_shader *shader)
             continue;
 
          nir_deref_instr *deref = nir_instr_as_deref(instr);
-         if (!nir_deref_mode_is(deref, nir_var_shader_call_data))
+         if (!nir_deref_mode_is(deref, nir_var_shader_call_data_in))
             continue;
 
-         deref->modes = nir_var_function_temp;
          progress = true;
 
          if (deref->deref_type == nir_deref_type_var) {
@@ -503,7 +502,7 @@ lower_rt_derefs_cps(nir_shader *shader)
 
             b.cursor = nir_before_instr(&deref->instr);
             nir_deref_instr *replacement =
-               nir_build_deref_cast(&b, arg_offset, nir_var_function_temp, deref->var->type, 0);
+               nir_build_deref_cast(&b, arg_offset, nir_var_shader_call_data_in, deref->var->type, 0);
             nir_def_replace(&deref->def, &replacement->def);
          }
       }
@@ -515,12 +514,12 @@ lower_rt_derefs_cps(nir_shader *shader)
 void
 radv_nir_lower_rt_io_cps(nir_shader *nir)
 {
-   NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_function_temp | nir_var_shader_call_data,
+   NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_shader_call_data_out | nir_var_shader_call_data_in,
             glsl_get_natural_size_align_bytes);
 
    NIR_PASS(_, nir, lower_rt_derefs_cps);
 
-   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_function_temp, nir_address_format_32bit_offset);
+   NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_shader_call_data_out | nir_var_shader_call_data_in, nir_address_format_32bit_offset);
 }
 
 void
@@ -560,8 +559,8 @@ radv_nir_init_cps_function(nir_function *function, bool uses_descriptor_heap)
 
    radv_nir_param_from_type(function->params + CPS_ARG_PRIMITIVE_ADDR, glsl_uint64_t_type(), false, 0);
 
-   function->driver_attributes =
-      (uint32_t)ACO_NIR_CALL_ABI_RT_RECURSIVE | ACO_NIR_FUNCTION_ATTRIB_DIVERGENT_CALL | ACO_NIR_FUNCTION_ATTRIB_NORETURN;
+   function->driver_attributes = (uint32_t)ACO_NIR_CALL_ABI_RT_RECURSIVE | ACO_NIR_FUNCTION_ATTRIB_DIVERGENT_CALL |
+                                 ACO_NIR_FUNCTION_ATTRIB_NORETURN;
 
    /* Entrypoints can't have parameters. Consider RT stages as callable functions */
    function->is_exported = true;

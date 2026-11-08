@@ -12,7 +12,6 @@
 #include "nvk_physical_device.h"
 #include "nvkmd/nvkmd.h"
 
-#include "util/detect_os.h"
 #include "vk_android.h"
 #include "vk_enum_to_str.h"
 #include "vk_format.h"
@@ -62,12 +61,12 @@ nvk_get_image_plane_format_features(const struct nvk_physical_device *pdev,
    if (nil_format_supports_texturing(&pdev->info, p_format)) {
       features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
       features |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+      if (pdev->info.cls_eng3d >= MAXWELL_B)
+         features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT;
    }
 
    if (nil_format_supports_filtering(&pdev->info, p_format)) {
       features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-      if (pdev->info.cls_eng3d >= MAXWELL_B)
-         features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT;
    }
 
    /* TODO: VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT */
@@ -89,6 +88,7 @@ nvk_get_image_plane_format_features(const struct nvk_physical_device *pdev,
          return 0;
 
       features |= VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
+      features |= VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
    }
 
    if (nvk_format_supports_storage(pdev, p_format)) {
@@ -293,9 +293,9 @@ nvk_get_drm_format_modifier_properties_list(const struct nvk_physical_device *pd
 }
 
 static VkFormatFeatureFlags2
-vk_image_usage_to_format_features(VkImageUsageFlagBits usage_flag)
+vk_image_usage_to_format_features(VkImageUsageFlagBits2KHR usage_flag)
 {
-   assert(util_bitcount(usage_flag) == 1);
+   assert(util_bitcount64(usage_flag) == 1);
    switch (usage_flag) {
    case VK_IMAGE_USAGE_TRANSFER_SRC_BIT:
       return VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
@@ -360,6 +360,10 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
    VkImageFormatProperties2 *pImageFormatProperties)
 {
    VK_FROM_HANDLE(nvk_physical_device, pdev, physicalDevice);
+
+   const VkImageUsageFlags2KHR all_usage =
+      vk_image_format_info_2_usage(pImageFormatInfo) |
+      vk_image_format_info_2_stencil_usage(pImageFormatInfo);
 
    const VkPhysicalDeviceExternalImageFormatInfo *external_info =
       vk_find_struct_const(pImageFormatInfo->pNext,
@@ -454,12 +458,12 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
        pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-   if ((pImageFormatInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
+   if ((all_usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
        (pImageFormatInfo->flags & (VK_IMAGE_CREATE_SPARSE_ALIASED_BIT |
                                    VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
@@ -472,12 +476,12 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
     * since it wouldn't know the other planes.
     * See comment in nvk_image_init() below for more details.
     */
-   if ((pImageFormatInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
+   if ((all_usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
+                     VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
        (pImageFormatInfo->flags & VK_IMAGE_CREATE_DISJOINT_BIT))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
@@ -538,14 +542,13 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
     * different usage than the image so we can't always filter on usage.
     * There is one exception to this below for storage.
     */
-   const VkImageUsageFlags image_usage = pImageFormatInfo->usage;
-   VkImageUsageFlags view_usage = image_usage;
+   VkImageUsageFlags2KHR view_usage = all_usage;
    if (pImageFormatInfo->flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)
       view_usage = 0;
 
-   u_foreach_bit(b, view_usage) {
+   u_foreach_bit64(b, view_usage) {
       VkFormatFeatureFlags2 usage_features =
-         vk_image_usage_to_format_features(1 << b);
+         vk_image_usage_to_format_features(1ull << b);
       if (usage_features && !(features & usage_features))
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
    }
@@ -639,7 +642,7 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    if ((pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) &&
-       (pImageFormatInfo->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT))
+       (all_usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    pImageFormatProperties->imageFormatProperties = (VkImageFormatProperties) {
@@ -1679,7 +1682,7 @@ nvk_bind_image_memory(struct nvk_device *dev,
    uint64_t offset_B = info->memoryOffset;
    VkResult result;
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    const VkNativeBufferANDROID *anb_info =
       vk_find_struct_const(info->pNext, NATIVE_BUFFER_ANDROID);
    if (anb_info != NULL && anb_info->handle != NULL) {

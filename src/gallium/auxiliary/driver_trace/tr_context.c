@@ -127,6 +127,44 @@ trace_context_draw_vbo(struct pipe_context *_pipe,
 }
 
 static void
+trace_context_draw_vbo_buffers(struct pipe_context *_pipe,
+                               const struct pipe_draw_info *info,
+                               const struct pipe_vertex_buffer *buffers,
+                               unsigned buffer_count,
+                               const struct pipe_draw_start_count_bias *draws,
+                               unsigned num_draws)
+{
+   struct trace_context *tr_ctx = trace_context(_pipe);
+   struct pipe_context *pipe = tr_ctx->pipe;
+
+   if (!tr_ctx->seen_fb_state && trace_dump_is_triggered())
+      dump_fb_state(tr_ctx, "current_framebuffer_state", true);
+
+   trace_dump_call_begin("pipe_context", "draw_vbo_buffers");
+
+   trace_dump_arg(ptr,  pipe);
+   trace_dump_arg(draw_info, info);
+   trace_dump_arg(uint, buffer_count);
+
+   trace_dump_arg_begin("buffers");
+   trace_dump_struct_array(vertex_buffer, buffers, buffer_count);
+   trace_dump_arg_end();
+   trace_dump_arg_begin("draws");
+   if (info->index.resource)
+      trace_dump_struct_array(draw_start_count_indexed, draws, num_draws);
+   else
+      trace_dump_struct_array(draw_start_count, draws, num_draws);
+   trace_dump_arg_end();
+   trace_dump_arg(uint, num_draws);
+
+   trace_dump_trace_flush();
+
+   trace_dump_call_end();
+
+   pipe->draw_vbo_buffers(pipe, info, buffers, buffer_count, draws, num_draws);
+}
+
+static void
 trace_context_draw_mesh_tasks(struct pipe_context *_pipe,
                               const struct pipe_grid_info *info)
 {
@@ -2521,6 +2559,16 @@ trace_context_resource_release(struct pipe_context *_pipe, struct pipe_resource 
    trace_dump_call_end();
 }
 
+static struct pipe_context *
+tr_get_driver_pipe_context(struct pipe_context *_pipe)
+{
+   struct pipe_context *pipe = trace_context(_pipe)->pipe;
+
+   if (pipe->get_driver_pipe_context)
+      return pipe->get_driver_pipe_context(pipe);
+   return pipe;
+}
+
 struct pipe_context *
 trace_context_create(struct trace_screen *tr_scr,
                      struct pipe_context *pipe)
@@ -2547,11 +2595,13 @@ trace_context_create(struct trace_screen *tr_scr,
    tr_ctx->base.const_uploader = pipe->const_uploader;
 
    tr_ctx->base.destroy = trace_context_destroy;
+   tr_ctx->base.get_driver_pipe_context = tr_get_driver_pipe_context;
 
 #define TR_CTX_INIT(_member) \
    tr_ctx->base . _member = pipe -> _member ? trace_context_ ## _member : NULL
 
    TR_CTX_INIT(draw_vbo);
+   TR_CTX_INIT(draw_vbo_buffers);
    TR_CTX_INIT(draw_mesh_tasks);
    TR_CTX_INIT(draw_vertex_state);
    TR_CTX_INIT(render_condition);
@@ -2696,10 +2746,17 @@ trace_context_check(const struct pipe_context *pipe)
 }
 
 /**
- * Threaded context is not wrapped, and so it may call fence functions directly
+ * Unwraps the trace layer of a context, if any.
+ *
+ * Screen functions that take a context receive the context the frontend
+ * holds, which may be wrapped by trace and/or the threaded context.
+ * Drivers unwrap threaded contexts themselves (see the guidelines in
+ * u_threaded_context.h), so only the trace layer is stripped here.
  */
 struct pipe_context *
-trace_get_possibly_threaded_context(struct pipe_context *pipe)
+trace_context_unwrap(struct pipe_context *pipe)
 {
-   return pipe->destroy == trace_context_destroy ? ((struct trace_context*)pipe)->pipe : pipe;
+   if (pipe && pipe->destroy == trace_context_destroy)
+      return ((struct trace_context *) pipe)->pipe;
+   return pipe;
 }

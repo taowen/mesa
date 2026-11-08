@@ -37,13 +37,7 @@
 #include "common/v3d_device_info.h"
 #include "wsi_common.h"
 #include "util/sparse_array.h"
-#include "util/perf/u_trace.h"
 #include "v3dv_drirc.h"
-#include "util/perf/u_trace.h"
-
-#ifdef HAVE_PERFETTO
-#include "v3dv_utrace_perfetto.h"
-#endif
 
 struct v3dv_event;
 struct v3dv_format;
@@ -95,6 +89,8 @@ struct v3dv_physical_device {
 
    struct v3d_device_info devinfo;
    struct v3d_perfcntrs *perfcntr;
+
+   bool has_tfu_ccol;
 
 #if USE_V3D_SIMULATOR
    struct v3d_simulator_file *sim_file;
@@ -382,25 +378,13 @@ struct v3dv_device {
     */
    struct v3dv_bo *default_attribute_float;
 
-   /* When nullDescriptor is enabled, this BO provides valid zeroed memory
-    * for null descriptor paths.
+   /* Zeroed BO used for null descriptors (nullDescriptor) and as the
+    * backing for null index buffers (maintenance6).
     */
    struct v3dv_bo *null_bo;
 
    void *device_address_mem_ctx;
    struct util_dynarray device_address_bo_list; /* Array of struct v3dv_bo * */
-
-   uint32_t job_id_counter;
-
-   struct {
-      struct u_trace_context utrace_ctx;
-#ifdef HAVE_PERFETTO
-      struct v3dv_utrace_perfetto utp;
-#endif
-      /* Intended to protect concurrent access to u_trace_context during queue
-       * submission when multiple queues are used */
-      mtx_t process_mutex;
-   } utrace;
 };
 
 struct v3dv_device_memory {

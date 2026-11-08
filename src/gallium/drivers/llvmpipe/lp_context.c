@@ -74,6 +74,10 @@ llvmpipe_destroy(struct pipe_context *pipe)
    if (llvmpipe->mesh_ctx) {
       lp_csctx_destroy(llvmpipe->mesh_ctx);
    }
+   for (i = 0; i < llvmpipe->max_global_buffers; i++)
+      pipe_resource_reference(&llvmpipe->global_buffers[i], NULL);
+   free(llvmpipe->global_buffers);
+
    if (llvmpipe->blitter) {
       util_blitter_destroy(llvmpipe->blitter);
    }
@@ -373,7 +377,6 @@ llvmpipe_create_context(struct pipe_screen *screen, void *priv,
    /* plug in AA line/point stages */
    draw_install_aaline_stage(llvmpipe->draw, &llvmpipe->pipe);
    draw_install_aapoint_stage(llvmpipe->draw, &llvmpipe->pipe, nir_type_bool1);
-   draw_install_pstipple_stage(llvmpipe->draw, &llvmpipe->pipe);
 
    /* convert points and lines into triangles:
     * (otherwise, draw points and lines natively)

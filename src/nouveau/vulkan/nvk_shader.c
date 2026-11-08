@@ -1249,7 +1249,7 @@ nir_opts(nir_shader *nir, void *data)
 
       NIR_PASS(progress, nir, nir_opt_peephole_select,
                &(nir_opt_peephole_select_options){
-                  .limit = 0,
+                  .limit = 8,
                   .discard_ok = true,
                });
 

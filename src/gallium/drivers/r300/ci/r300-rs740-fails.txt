@@ -51,7 +51,6 @@ dEQP-GLES2.functional.uniform_api.value.assigned.by_pointer.render.nested_struct
 
 shaders@glsl-arb-fragment-coord-conventions,Fail
 shaders@glsl-derivs,Fail
-shaders@glsl-fs-fogscale@vs and fs,Fail
 shaders@glsl-fs-loop,Fail
 shaders@glsl-fs-loop-nested,Fail
 shaders@glsl-fwidth,Fail
@@ -69,7 +68,6 @@ spec@!opengl 1.0@depth-clear-precision-check@depth24,Fail
 spec@!opengl 1.0@depth-clear-precision-check@depth24_stencil8,Fail
 spec@!opengl 1.0@depth-clear-precision-check@depth32,Fail
 spec@!opengl 1.0@gl-1.0-drawbuffer-modes,Fail
-spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 
 spec@!opengl 1.1@depthstencil-default_fb-blit samples=2,Fail
 spec@!opengl 1.1@depthstencil-default_fb-blit samples=4,Fail
@@ -117,10 +115,6 @@ spec@!opengl 1.4@triangle-rasterization,Fail
 spec@!opengl 1.4@triangle-rasterization-fbo,Fail
 
 spec@!opengl 2.0@gl-2.0-two-sided-stencil,Fail
-
-spec@!opengl 2.1@pbo,Fail
-spec@!opengl 2.1@pbo@test_polygon_stip,Fail
-spec@!opengl 2.1@polygon-stipple-fs,Fail
 
 spec@arb_clear_texture@arb_clear_texture-float,Fail
 
@@ -314,10 +308,6 @@ spec@ext_texture_srgb@texwrap formats@GL_SRGB8_ALPHA8- NPOT,Fail
 spec@ext_texture_srgb@texwrap formats@GL_SRGB8_ALPHA8- swizzled,Fail
 
 # Precision issues in fs
-spec@glsl-1.10@execution@built-in-functions@fs-atan-float-float,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-atan-vec2-vec2,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-atan-vec3-vec3,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-atan-vec4-vec4,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-degrees-float,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-degrees-vec2,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-degrees-vec3,Fail
@@ -466,10 +456,6 @@ spec@glsl-1.10@execution@derivatives@glsl-derivs-sign,Fail
 spec@glsl-1.10@execution@derivatives@glsl-derivs-swizzle,Fail
 spec@glsl-1.10@execution@derivatives@glsl-derivs-varyings,Fail
 spec@glsl-1.10@execution@discard@glsl-fs-discard-04,Fail
-spec@glsl-1.10@execution@fs-sign-times-abs,Fail
-spec@glsl-1.10@execution@fs-sign-times-neg,Fail
-spec@glsl-1.10@execution@fs-sign-times-neg-abs,Fail
-spec@glsl-1.10@execution@fs-sign-times-sign,Fail
 spec@glsl-1.10@execution@glsl-1.10-built-in-matrix-state,Fail
 spec@glsl-1.10@execution@glsl-fs-convolution-2,Fail
 spec@glsl-1.10@execution@glsl-fs-if-nested-loop,Fail
@@ -491,14 +477,6 @@ spec@glsl-1.20@execution@const-builtin@glsl-const-builtin-normalize,Fail
 spec@glsl-1.20@execution@fs-function-inout-array-of-structs,Fail
 
 # https://gitlab.freedesktop.org/mesa/mesa/-/issues/8618
-spec@glsl-1.20@execution@fs-nan-builtin-max,Fail
-spec@glsl-1.20@execution@fs-nan-builtin-min,Fail
-
-# piglit bug, requires GLSL >= 1.20 but specifies #version 130
-spec@glsl-1.20@execution@vs-loop-uint-induction-var-1,Fail
-spec@glsl-1.20@execution@vs-loop-uint-induction-var-2,Fail
-spec@glsl-1.20@execution@vs-loop-uint-induction-var-3,Fail
-spec@glsl-1.20@execution@vs-loop-uint-induction-var-4,Fail
 
 spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture() cube,Fail
 spec@glsl-1.20@execution@tex-miplevel-selection gl2:texture(bias) cube,Fail
@@ -618,13 +596,7 @@ spec@glsl-1.20@execution@uniform-initializer@fs-mat4-array,Fail
 spec@intel_performance_query@intel_performance_query-issue_2235,Fail
 
 spec@khr_texture_compression_astc@basic-gles,Fail
-spec@khr_texture_compression_astc@miptree-gl srgb-fp,Fail
 spec@khr_texture_compression_astc@miptree-gl srgb-fp@sRGB decode full precision,Fail
-# piglit issue, needs OES_texture_npot check
-spec@khr_texture_compression_astc@miptree-gles hdr,Fail
-spec@khr_texture_compression_astc@miptree-gles ldr,Fail
-spec@khr_texture_compression_astc@miptree-gles srgb,Fail
-spec@khr_texture_compression_astc@miptree-gles srgb-fp,Fail
 
 spec@nv_primitive_restart@primitive-restart-draw-mode-lines,Fail
 spec@nv_primitive_restart@primitive-restart-draw-mode-quad_strip,Fail
@@ -646,4 +618,3 @@ glx@glx-multi-window-single-context,Fail
 glx@glx-swap-pixmap-bad,Fail
 glx@glx_arb_sync_control@waitformsc,Fail
 spec@egl 1.4@largest possible eglcreatepbuffersurface and then glclear,Fail
-spec@egl_mesa_configless_context@basic,Fail

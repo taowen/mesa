@@ -124,7 +124,7 @@ vram_report_limit_env_get_static_heap_size_or_default()
    const char *const env_var_value_str =
       os_get_option(VK_VRAM_REPORT_LIMIT_HEAP_SIZE_ENV_VAR_NAME);
    if (!env_var_value_str) {
-      goto err_return;
+      return VRAM_REPORT_LIMIT_STATIC_HEAP_SIZE_DEFAULT;
    }
 
    const char *start_ptr = env_var_value_str;
@@ -148,7 +148,7 @@ err_return:
    fprintf(
       stderr,
       VRAM_REPORT_LIMIT_ERROR_LOG_TAG VK_VRAM_REPORT_LIMIT_HEAP_SIZE_ENV_VAR_NAME
-      " is invalid or not set.\n");
+      " is invalid.\n");
 
    return VRAM_REPORT_LIMIT_STATIC_HEAP_SIZE_DEFAULT;
 }
@@ -165,7 +165,7 @@ vram_report_limit_env_get_device_id(VkVendorId *vendor_id_out,
    const char *const env_var_value_str =
       os_get_option(VK_VRAM_REPORT_LIMIT_DEVICE_ID_ENV_VAR_NAME);
    if (!env_var_value_str) {
-      goto err_return;
+      return false;
    }
 
    char *end_ptr;
@@ -198,7 +198,7 @@ err_return:
    fprintf(
       stderr,
       VRAM_REPORT_LIMIT_ERROR_LOG_TAG VK_VRAM_REPORT_LIMIT_DEVICE_ID_ENV_VAR_NAME
-      " is invalid or not set.\n");
+      " is invalid.\n");
    return false;
 }
 

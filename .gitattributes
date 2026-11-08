@@ -5,4 +5,3 @@
 *.gif binary
 *.ico binary
 *.cl gitlab-language=c
-docs/relnotes/new_features.txt merge=union

@@ -15,8 +15,8 @@
 extern "C" {
 #endif
 
-#define DUPL_16BITS_IN_DWORD(x) (((x) << 16) | (x))
-#define DUPL_8BITS_IN_DWORD(x) (((x) << 24) | ((x) << 16) | ((x) << 8) | (x))
+#define DUPL_16BITS_IN_DWORD(x) (((uint32_t)(x) << 16) | (x))
+#define DUPL_8BITS_IN_DWORD(x) (((uint32_t)(x) << 24) | ((x) << 16) | ((x) << 8) | (x))
 #define DUPL_4BITS_IN_DWORD(x) DUPL_8BITS_IN_DWORD((x) | ((x) << 4))
 
 #define DCC_CODE                       DUPL_8BITS_IN_DWORD
@@ -107,7 +107,25 @@ enum {
  * - compressed: CMASK compresses the FMASK image in a proprietary manner similar to DCC.
  * - decompressed: FMASK is a regular UINT8, UINT16, or UINT32 image.
  *
- * TC-compatible CMASK removes the middle "compressed" state.
+ * TC-compatible CMASK removes the middle "compressed" state, which means that it can only be set
+ * to one of these 2 values:
+ * 1. CMASK_MSAA_FMASK_CLEAR_0_COLOR_EXPANDED, which means FMASK loads return 0 and FMASK content
+ *    is ignored.
+ * 2. CMASK_*xMSAA_FMASK_UNCOMPRESSED_COLOR_EXPANDED, which means FMASK loads return FMASK pixels.
+ *
+ * Unlike DCC and HTILE-based compression, image stores into FMASK that's compressed by
+ * TC-compatible CMASK never corrupt FMASK. TC-compatible FMASK compression via CMASK doesn't
+ * store any compressed data in FMASK. TC-compatible CMASK only determines whether FMASK is read
+ * or whether FMASK reads are skipped and 0 is returned to shaders instead. Therefore, image
+ * stores can write FMASK at any time, and if CMASK doesn't indicate "cleared to 0", those FMASK
+ * pixels are returned via later image loads to shaders. If CMASK indicates "cleared to 0",
+ * nothing is read from FMASK, and therefore image stores into FMASK have no visible effect
+ * on FMASK loads with CMASK enabled. When writing an FMASK copy shader, one optimization is to
+ * write only the corresponding CMASK clear value to CMASK if an FMASK tile contains only zeros,
+ * and skip all FMASK image stores. This only applies to TC-compatible CMASK and not
+ * TC-incompatible CMASK. TC-incompatible CMASK does store compressed FMASK data into the FMASK
+ * image if CMASK is in the compressed state (not cleared and not decompressed). BTW, DCC and
+ * HTILE also have clear states where raw image stores that bypass compression have no effect.
  *
  * CMASK can also contain fast clear state for the MSAA color image predating DCC fast clear, but
  * that's unrelated to FMASK. If that's used, CMASK provides fast clear for both FMASK and the color
@@ -194,6 +212,28 @@ enum {
    #define FMASK_EQAA_16S_8F_EXPANDED 0x8888888876543210ull /* 8-byte clear value */
 };
 
+/* HTILE definitions:
+ * - Z/S decompression: Read compressed tiles and write them uncompressed. zmask (for Z) and smem
+ *   (for stencil) are cleared to ~0 in HTILE, meaning "uncompressed". This is what Z/S decompression
+ *   via DB seems to do. It doesn't seem to change any other HTILE fields.
+ * - Z expansion (for HiZ): Set the Z bounds to [0, 1], which represent the minimum and maximum Z
+ *   present in each tile of the Z image and are encoded in minz/maxz or zbase/zdelta HTILE fields.
+ *   No change to image data. It only affects subsequent Z tests. Setting FORCE_FULL_Z_RANGE during
+ *   Z tests makes the HW ignore the Z bounds in HTILE.
+ * - Stencil expansion (for HiS): Set sr0 and sr1 to neutral values in HTILE. No change to image
+ *   data. It only affects subsequent stencil tests. (note that we don't use this in Mesa)
+ *
+ * When image stores ignore HTILE and such image stores touch any compressed 8x8 tile
+ * (represented by 1 HTILE dword), that whole 8x8 tile can get corrupted because even one
+ * changed byte can affect the content of all 8x8 pixels in the tile.
+ *
+ * The best thing to do is:
+ * - Partially overwritten 8x8 tiles: Decompress them before image stores.
+ * - Fully overwritten 8x8 tiles: Only set the HTILE dword of that tile to uncompressed.
+ * - For both of the above: Recompute the Z bounds of each touched tile and write them
+ *   to the HTILE dword.
+ * - Untouched tiles: Leave them alone.
+ */
 typedef union {
    /* Z only */
    struct {
@@ -373,11 +413,6 @@ void
 ac_build_texture_descriptor(const struct radeon_info *info,
                             const struct ac_texture_state *state,
                             uint32_t desc[8]);
-
-uint32_t
-ac_tile_mode_index(const struct radeon_surf *surf,
-                   unsigned level,
-                   bool stencil);
 
 struct ac_mutable_tex_state {
    const struct radeon_surf *surf;

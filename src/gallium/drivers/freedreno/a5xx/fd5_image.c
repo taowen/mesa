@@ -169,8 +169,9 @@ emit_image_ssbo(struct fd_ringbuffer *ring, unsigned slot,
    OUT_RING(ring, CP_LOAD_STATE4_1_STATE_TYPE(ST4_CONSTANTS) |
                      CP_LOAD_STATE4_1_EXT_SRC_ADDR(0));
    OUT_RING(ring, CP_LOAD_STATE4_2_EXT_SRC_ADDR_HI(0));
-   OUT_RING(ring,
-            A5XX_SSBO_1_0_FMT(img->fmt) | A5XX_SSBO_1_0_WIDTH(img->width));
+   OUT_RING(ring, A5XX_SSBO_1_0_FMT(img->fmt) |
+                     A5XX_SSBO_1_0_SWAP(fd5_pipe2swap(img->pfmt)) |
+                     A5XX_SSBO_1_0_WIDTH(img->width));
    OUT_RING(ring, A5XX_SSBO_1_1_HEIGHT(img->height) |
                      A5XX_SSBO_1_1_DEPTH(img->depth));
 

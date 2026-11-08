@@ -76,10 +76,10 @@ pack_ir_node_id(uint32_t offset, uint32_t type)
 }
 
 float
-aabb_surface_area(vk_aabb aabb)
+aabb_half_surface_area(vk_aabb aabb)
 {
    vec3 diagonal = aabb.max - aabb.min;
-   return 2 * diagonal.x * diagonal.y + 2 * diagonal.y * diagonal.z + 2 * diagonal.x * diagonal.z;
+   return diagonal.x * diagonal.y + diagonal.y * diagonal.z + diagonal.x * diagonal.z;
 }
 
 /* Just a wrapper for 3 uints. */

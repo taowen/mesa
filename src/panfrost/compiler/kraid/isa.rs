@@ -4,7 +4,6 @@
 
 use crate::ir::{DataType, SmallConstant};
 use compiler::enum_as_u8::*;
-use std::marker::PhantomData;
 
 #[derive(Debug)]
 pub enum EncodeError {
@@ -39,6 +38,7 @@ impl std::fmt::Display for EncodeError {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum InvalidInstrError {
     Any,
@@ -135,6 +135,7 @@ pub enum ExecUnit {
     Sfu,
 }
 
+#[allow(dead_code)]
 pub trait FauSpecialPageResolver {
     type P0: TryDecode<u8> + std::fmt::Display;
     type P1: TryDecode<u8> + std::fmt::Display;
@@ -265,132 +266,327 @@ pub struct SrWriteLanes<L: Copy> {
 }
 
 pub mod v9 {
-    enum SourceEncodingX<T, R, const IS64: bool>
-    where
-        T: SmallConstantTable + std::fmt::Display,
-        R: FauSpecialPageResolver,
-    {
-        Register {
-            idx: u8,
-            last: bool,
-        },
-        Fau {
-            idx: u8,
-            page: u8,
-            fau32: bool,
-        },
-        SmallConst(T),
-        FauSpec {
-            word_select: bool,
-            name: String,
-            _r: PhantomData<R>,
-        },
-    }
+    use kraid_proc_macros::*;
+    gen_isa_encode!(9..=14);
 
-    // TODO v14: zext
-    impl<T, R, const IS64: bool> SourceEncodingX<T, R, IS64>
-    where
-        EncodeError: From<<T as TryDecode<u8>>::Error>,
-        T: SmallConstantTable + std::fmt::Display,
-        R: FauSpecialPageResolver,
-        EncodeError: From<<R::P0 as TryDecode<u8>>::Error>,
-        EncodeError: From<<R::P1 as TryDecode<u8>>::Error>,
-        EncodeError: From<<R::P3 as TryDecode<u8>>::Error>,
-    {
-        fn try_decode(
-            v: u8,
-            arch: u8,
-            fau_page_index: u8,
-            fau32: bool,
-        ) -> std::result::Result<SourceEncodingX<T, R, IS64>, EncodeError>
-        {
-            if arch > 14 {
-                return Err("Only supports up to v14 atm".into());
-            }
-            let mode = (v >> 6) & 0b11;
-            let mode2 = (v >> 5) & 0b1;
-            match (mode, mode2) {
-                (0b00, _) | (0b01, _) => Ok(SourceEncodingX::Register {
-                    idx: v & 0x3f,
-                    last: mode != 0,
-                }),
-                (0b10, _) => Ok(SourceEncodingX::Fau {
-                    idx: v & 0x3f,
-                    page: fau_page_index,
-                    fau32,
-                }),
-                (0b11, 0b0) => {
-                    let as_enum = T::try_decode((v & 0x1f) as u8, arch)?;
-                    Ok(SourceEncodingX::SmallConst(as_enum))
-                }
-                (0b11, 0b1) => {
-                    let idx32 = (v & 0x1f) >> 1;
-                    let word_select = (v & 0b1) == 1;
-                    let name = R::get_name(fau_page_index, idx32, arch)?;
-                    Ok(SourceEncodingX::FauSpec {
-                        word_select,
-                        name,
-                        _r: PhantomData,
-                    })
-                }
-                _ => Err("Invalid SourceEncoding".into()),
-            }
+    #[cfg(kraid_disasm)]
+    pub mod decode {
+        use super::*;
+        use crate::isa::*;
+        use rustc_hash::FxHashMap;
+
+        enum DecodeStage {
+            Inner {
+                mask: u64,
+                children: &'static [(u64, usize)],
+            },
+            // (mask, value, instr index)
+            Leaf(&'static [(u64, u64, usize)]),
         }
-    }
 
-    impl<T, R, const IS64: bool> std::fmt::Display for SourceEncodingX<T, R, IS64>
-    where
-        T: SmallConstantTable + std::fmt::Display,
-        R: FauSpecialPageResolver,
-    {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                SourceEncodingX::Register { idx, last } => {
-                    let tag = if *last { "^" } else { "" };
-                    if IS64 {
-                        write!(f, "[r{}{}:r{}{}]", idx, tag, idx + 1, tag)
-                    } else {
-                        write!(f, "r{}{}", idx, tag)
+        fn try_decode_table(
+            instr: u64,
+            arch: u8,
+            table: &[DecodeStage],
+        ) -> Result<usize, InvalidInstrError> {
+            let mut stage_idx = 0;
+            'stages: loop {
+                match table[stage_idx] {
+                    DecodeStage::Inner { mask, children } => {
+                        let masked = instr & mask;
+                        for (val, next) in children {
+                            if masked == *val {
+                                assert!(stage_idx < *next);
+                                stage_idx = *next;
+                                continue 'stages;
+                            }
+                        }
+                        // Failed to decode
+                        return Err(InvalidInstrError::Any);
+                    }
+                    DecodeStage::Leaf(options) => {
+                        for (mask, value, instr_idx) in options {
+                            let masked = instr & mask;
+                            if masked == *value
+                                && try_instr(*instr_idx, instr, arch).is_ok()
+                            {
+                                return Ok(*instr_idx);
+                            }
+                        }
+                        // Failed to decode
+                        return Err(InvalidInstrError::Any);
                     }
                 }
-                SourceEncodingX::SmallConst(value) => {
-                    write!(f, "{}", value)
+            }
+        }
+
+        enum SourceEncodingX<const IS64: bool> {
+            Register {
+                idx: u8,
+                last: bool,
+                zext: bool,
+            },
+            Fau {
+                idx: u8,
+                page: u8,
+                fau32: bool,
+                zext: bool,
+            },
+            SmallConst(super::SmallConstantT),
+            FauSpec {
+                word_select: bool,
+                name: String,
+                zext: bool,
+            },
+        }
+
+        impl<const IS64: bool> SourceEncodingX<IS64> {
+            fn try_decode(
+                v: u8,
+                arch: u8,
+                fau_page_index: u8,
+                fau32: bool,
+            ) -> std::result::Result<SourceEncodingX<IS64>, EncodeError>
+            {
+                if arch > 14 {
+                    return Err("Only supports up to v14 atm".into());
                 }
-                SourceEncodingX::Fau { idx, page, fau32 } => {
-                    if *fau32 {
-                        write!(f, "u{}", 64 * page + idx)
-                    } else {
+                /* V14 onwards, bit 0 sets the .zext flag in 64 bit sources */
+                let bit0_is_zext = IS64 && arch >= 14;
+                let bit0 = (v & 1) != 0;
+                let zext = bit0_is_zext && bit0;
+                let mode = (v >> 6) & 0b11;
+                let mode2 = (v >> 5) & 0b1;
+                match (mode, mode2) {
+                    (0b00, _) | (0b01, _) => Ok(SourceEncodingX::Register {
+                        idx: if bit0_is_zext { v & 0x3e } else { v & 0x3f },
+                        last: mode != 0,
+                        zext,
+                    }),
+                    (0b10, _) => Ok(SourceEncodingX::Fau {
+                        idx: if bit0_is_zext { v & 0x3e } else { v & 0x3f },
+                        page: fau_page_index,
+                        fau32,
+                        zext,
+                    }),
+                    (0b11, 0b0) => {
+                        let as_enum =
+                            SmallConstantT::try_decode((v & 0x1f) as u8, arch)?;
+                        Ok(SourceEncodingX::SmallConst(as_enum))
+                    }
+                    (0b11, 0b1) => {
+                        let idx32 = (v & 0x1f) >> 1;
+                        let name = FauSpecialIndexPage::get_name(
+                            fau_page_index,
+                            idx32,
+                            arch,
+                        )?;
+                        Ok(SourceEncodingX::FauSpec {
+                            word_select: !IS64 && bit0,
+                            name,
+                            zext,
+                        })
+                    }
+                    _ => Err("Invalid SourceEncoding".into()),
+                }
+            }
+        }
+
+        impl<const IS64: bool> std::fmt::Display for SourceEncodingX<IS64> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    SourceEncodingX::Register { idx, last, zext } => {
+                        let tag = if *last { "^" } else { "" };
+                        let zext_tag = if *zext { ".zext" } else { "" };
+                        if IS64 {
+                            write!(
+                                f,
+                                "[r{}{}:r{}{}]{}",
+                                idx,
+                                tag,
+                                idx + 1,
+                                tag,
+                                zext_tag
+                            )
+                        } else {
+                            write!(f, "r{}{}", idx, tag)
+                        }
+                    }
+                    SourceEncodingX::SmallConst(value) => {
+                        write!(f, "{}", value)
+                    }
+                    SourceEncodingX::Fau {
+                        idx,
+                        page,
+                        fau32,
+                        zext,
+                    } => {
+                        let zext_tag = if *zext { ".zext" } else { "" };
+                        if *fau32 {
+                            write!(f, "u{}{}", 64 * page + idx, zext_tag)
+                        } else {
+                            let hl = if IS64 {
+                                ""
+                            } else if (idx & 0b1) == 1 {
+                                ".w1"
+                            } else {
+                                ".w0"
+                            };
+                            let idx32 = idx >> 1;
+                            write!(
+                                f,
+                                "u{}{}{}",
+                                32 * page + idx32,
+                                hl,
+                                zext_tag
+                            )
+                        }
+                    }
+                    SourceEncodingX::FauSpec {
+                        name,
+                        word_select,
+                        zext,
+                        ..
+                    } => {
+                        let zext_tag = if *zext { ".zext" } else { "" };
                         let hl = if IS64 {
                             ""
-                        } else if (idx & 0b1) == 1 {
+                        } else if *word_select {
                             ".w1"
                         } else {
                             ".w0"
                         };
-                        let idx32 = idx >> 1;
-                        write!(f, "u{}{}", 32 * page + idx32, hl)
+                        write!(f, "{}{}{}", &name, hl, zext_tag)
                     }
-                }
-                SourceEncodingX::FauSpec {
-                    name, word_select, ..
-                } => {
-                    let hl = if IS64 {
-                        ""
-                    } else if *word_select {
-                        ".w1"
-                    } else {
-                        ".w0"
-                    };
-                    write!(f, "{}{}", &name, hl)
                 }
             }
         }
+
+        type SourceEncoding = SourceEncodingX<false>;
+        type SourceEncoding64 = SourceEncodingX<true>;
+
+        type DecodeResult<T> = Result<Option<Box<T>>, InvalidInstrError>;
+        type DecodeFn = fn(
+            u32,
+            &FxHashMap<&'static str, u32>,
+            u8,
+            &PrintCtx,
+        ) -> DecodeResult<dyn std::fmt::Display>;
+
+        enum LoadFn {
+            Physical(fn(u64) -> u32),
+            Virtual(
+                fn(
+                    &FxHashMap<&'static str, u32>,
+                    u8,
+                ) -> Result<u32, EncodeError>,
+            ),
+        }
+
+        struct Field {
+            name: &'static str,
+            is_mod: bool,
+            load: LoadFn,
+            decode: DecodeFn,
+        }
+
+        pub struct Instr {
+            name: &'static str,
+            variant: Option<&'static str>,
+            fields: &'static [u32],
+        }
+
+        impl Instr {
+            /// Iterate over fields in the order they appear in the asm syntax.
+            fn iter_fields(&self) -> impl Iterator<Item = &Field> {
+                self.fields.iter().map(|idx| &FIELDS[*idx as usize])
+            }
+        }
+
+        fn try_instr(
+            instr_idx: usize,
+            val: u64,
+            arch: u8,
+        ) -> Result<(), InvalidInstrError> {
+            print_instr_int(
+                &DISASM_TABLE[instr_idx],
+                val,
+                arch,
+                &mut std::io::sink(),
+                &Default::default(),
+            )
+            .map_err(|e| e.into_invalid_instr())
+        }
+
+        pub fn print_instr(
+            instr: &Instr,
+            val: u64,
+            arch: u8,
+            f: &mut dyn std::io::Write,
+            ctx: &PrintCtx,
+        ) -> std::io::Result<()> {
+            let res = print_instr_int(instr, val, arch, f, ctx);
+            match res {
+                Err(PrintError::InvalidInstr(e)) => write!(f, "{}", e),
+                Err(PrintError::Fmt(_)) => write!(f, "<format error>"),
+                Err(PrintError::Io(e)) => Err(e),
+                Ok(()) => Ok(()),
+            }
+        }
+
+        fn print_instr_int(
+            instr: &Instr,
+            val: u64,
+            arch: u8,
+            f: &mut dyn std::io::Write,
+            ctx: &PrintCtx,
+        ) -> Result<(), PrintError> {
+            let mut values: FxHashMap<&'static str, u32> = Default::default();
+
+            for field in instr.iter_fields() {
+                let LoadFn::Physical(load) = &field.load else {
+                    continue;
+                };
+                values.insert(field.name, load(val));
+            }
+
+            for field in instr.iter_fields() {
+                let LoadFn::Virtual(load) = &field.load else {
+                    continue;
+                };
+                values.insert(field.name, load(&values, arch)?);
+            }
+
+            write!(f, "{}", instr.name)?;
+            if let Some(variant) = instr.variant {
+                write!(f, ".{}", variant)?;
+            }
+
+            let mut had_non_mod = false;
+
+            for field in instr.iter_fields() {
+                if let Some(val) = (field.decode)(
+                    *values.get(field.name).unwrap(),
+                    &values,
+                    arch,
+                    ctx,
+                )? {
+                    if field.is_mod {
+                        write!(f, ".")?;
+                    } else if had_non_mod {
+                        write!(f, ", ")?;
+                    } else {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{val}")?;
+
+                    had_non_mod |= !field.is_mod;
+                }
+            }
+
+            Ok(())
+        }
+
+        gen_isa_decode!(9..=14);
     }
-
-    type SourceEncoding<T, R> = SourceEncodingX<T, R, false>;
-    type SourceEncoding64<T, R> = SourceEncodingX<T, R, true>;
-
-    use kraid_proc_macros::*;
-    gen_isa_encode!("isa-v9-v14.xml", 9..=14);
-    gen_isa_decode!("isa-v9-v14.xml", 9..=14);
 }

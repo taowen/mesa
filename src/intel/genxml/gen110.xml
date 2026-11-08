@@ -463,9 +463,10 @@
       <value name="YUV 4:2:2" value="0" />
       <value name="RGBA 4:4:4:4" value="1" />
       <value name="YUV 4:4:4" value="2" />
-      <value name="Y8_UNORM" value="3" />
+      <value name="P010_VARIANT" value="3" />
       <value name="PLANAR_420_8" value="4" />
       <value name="P010" value="13" />
+      <value name="Y8_UNORM" value="15" />
     </field>
     <field name="Y Offset for U(Cb)" dword="2" bits="14:0" type="uint" />
     <field name="X Offset for U(Cb)" dword="2" bits="30:16" type="uint" />
@@ -2903,8 +2904,8 @@
     <field name="Media Command Opcode" dword="0" bits="26:23" type="uint" default="1" />
     <field name="Pipeline" dword="0" bits="28:27" type="uint" default="2" />
     <field name="Command Type" dword="0" bits="31:29" type="uint" default="3" />
-    <field name="8X Surface State" dword="2" bits="127:0" type="VDENC_SURFACE_STATE_FIELDS" />
-    <field name="4X Surface State" dword="6" bits="127:0" type="VDENC_SURFACE_STATE_FIELDS" />
+    <field name="Surface State 0" dword="2" bits="127:0" type="VDENC_SURFACE_STATE_FIELDS" />
+    <field name="Surface State 1" dword="6" bits="127:0" type="VDENC_SURFACE_STATE_FIELDS" />
   </instruction>
   <instruction name="VDENC_IMG_STATE" bias="2" length="35" engine="video">
     <field name="DWord Length" dword="0" bits="11:0" type="uint" default="33" />

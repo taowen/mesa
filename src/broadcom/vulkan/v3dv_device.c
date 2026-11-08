@@ -41,7 +41,6 @@
 #include "v3dv_cmd_buffer.h"
 #include "v3dv_image.h"
 #include "v3dv_entrypoints.h"
-#include "v3dv_utrace.h"
 #include "v3dv_version_dispatch.h"
 
 #include "vk_android.h"
@@ -66,7 +65,7 @@
 
 #include <sys/stat.h>
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 #include <vndk/hardware_buffer.h>
 #include "util/u_gralloc/u_gralloc.h"
 #endif
@@ -203,6 +202,10 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_maintenance3                     = true,
       .KHR_maintenance4                     = true,
       .KHR_maintenance5                     = true,
+      .KHR_maintenance6                     = true,
+      .KHR_maintenance7                     = true,
+      .KHR_maintenance8                     = true,
+      .KHR_map_memory2                      = true,
       .KHR_multiview                        = true,
       .KHR_pipeline_executable_properties   = true,
       .KHR_separate_depth_stencil_layouts   = true,
@@ -224,6 +227,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_shader_integer_dot_product       = true,
       .KHR_shader_terminate_invocation      = true,
       .KHR_synchronization2                 = true,
+      .KHR_unified_image_layouts            = true,
       .KHR_workgroup_memory_explicit_layout = true,
 #ifdef V3DV_USE_WSI_PLATFORM
       .KHR_swapchain                        = true,
@@ -239,6 +243,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_vertex_attribute_divisor         = true,
       .KHR_vulkan_memory_model              = true,
       .KHR_zero_initialize_workgroup_memory = true,
+      .ARM_rasterization_order_attachment_access = true,
       .EXT_4444_formats                     = true,
       .EXT_attachment_feedback_loop_layout  = true,
       .EXT_border_color_swizzle             = true,
@@ -258,6 +263,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_hdr_metadata                     = true,
 #endif
       .EXT_host_query_reset                 = true,
+      .EXT_host_image_copy                  = true,
       .EXT_image_drm_format_modifier        = true,
       .EXT_image_robustness                 = true,
       .EXT_index_type_uint8                 = true,
@@ -268,6 +274,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_pipeline_creation_cache_control  = true,
       .EXT_pipeline_creation_feedback       = true,
       .EXT_pipeline_robustness              = true,
+      .EXT_rasterization_order_attachment_access = true,
       .EXT_robustness2                      = true,
       .EXT_primitive_topology_list_restart  = true,
       .EXT_private_data                     = true,
@@ -288,7 +295,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .GOOGLE_display_timing = wsi_instance_supports_google_display_timing(device->vk.instance, &v3dv_instance->drirc.options),
 #endif
    };
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    struct u_gralloc *gralloc = vk_android_get_ugralloc();
    if (gralloc && u_gralloc_get_type(gralloc) != U_GRALLOC_TYPE_FALLBACK) {
       ext->ANDROID_external_memory_android_hardware_buffer = true;
@@ -497,6 +504,11 @@ get_features(const struct v3dv_physical_device *physical_device,
       /* VK_EXT_color_write_enable */
       .colorWriteEnable = true,
 
+      /* VK_EXT_rasterization_order_attachment_access */
+      .rasterizationOrderColorAttachmentAccess = true,
+      .rasterizationOrderDepthAttachmentAccess = true,
+      .rasterizationOrderStencilAttachmentAccess = true,
+
       /* VK_EXT_extended_dynamic_state */
       .extendedDynamicState = true,
 
@@ -585,6 +597,10 @@ get_features(const struct v3dv_physical_device *physical_device,
       /* VK_KHR_maintenance5 */
       .maintenance5 = true,
 
+      /* VK_KHR_unified_layouts */
+      .unifiedImageLayouts = true,
+      .unifiedImageLayoutsVideo = false,
+
 #ifdef V3DV_USE_WSI_PLATFORM
       /* VK_KHR_swapchain_maintenance1 */
       .swapchainMaintenance1 = true,
@@ -614,6 +630,18 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
+
+      /* VK_KHR_maintenance6 */
+      .maintenance6 = true,
+
+      /* VK_EXT_host_image_copy */
+      .hostImageCopy = true,
+
+      /* VK_KHR_maintenance7 */
+      .maintenance7 = true,
+
+      /* VK_KHR_maintenance8 */
+      .maintenance8 = true,
    };
 }
 
@@ -1202,9 +1230,9 @@ get_device_properties(const struct v3dv_physical_device *device,
       .driverID = VK_DRIVER_ID_MESA_V3DV,
       .conformanceVersion = {
          .major = 1,
-         .minor = 3,
-         .subminor = 8,
-         .patch = 3,
+         .minor = 4,
+         .subminor = 6,
+         .patch = 2,
       },
       .supportedDepthResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
       .supportedStencilResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
@@ -1336,7 +1364,7 @@ get_device_properties(const struct v3dv_physical_device *device,
       /* VkPhysicalDevicePerformanceQueryPropertiesKHR */
       .allowCommandBufferQueryCopies = true,
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       /* VkPhysicalDevicePresentationPropertiesANDROID */
       .sharedImage = !!vk_android_get_front_buffer_usage(),
 #endif
@@ -1386,6 +1414,24 @@ get_device_properties(const struct v3dv_physical_device *device,
       .polygonModePointSize = true,
       .nonStrictSinglePixelWideLinesUseParallelogram = true,
       .nonStrictWideLinesUseParallelogram = true,
+
+      /* VK_KHR_maintenance6 */
+      .blockTexelViewCompatibleMultipleLayers = false,
+      .maxCombinedImageSamplerDescriptorCount = V3DV_MAX_PLANE_COUNT,
+      .fragmentShadingRateClampCombinerInputs = false,
+
+      /* VK_KHR_maintenance7 */
+      .robustFragmentShadingRateAttachmentAccess = false,
+      .separateDepthStencilAttachmentAccess = false,
+      .maxDescriptorSetTotalUniformBuffersDynamic = MAX_DYNAMIC_UNIFORM_BUFFERS,
+      .maxDescriptorSetTotalStorageBuffersDynamic = MAX_DYNAMIC_STORAGE_BUFFERS,
+      .maxDescriptorSetTotalBuffersDynamic = MAX_DYNAMIC_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalUniformBuffersDynamic =
+         MAX_DYNAMIC_UNIFORM_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalStorageBuffersDynamic =
+         MAX_DYNAMIC_STORAGE_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalBuffersDynamic =
+         MAX_DYNAMIC_BUFFERS,
    };
 
    /* VkPhysicalDeviceShaderModuleIdentifierPropertiesEXT */
@@ -1412,6 +1458,55 @@ get_device_properties(const struct v3dv_physical_device *device,
    memset(properties->driverInfo, 0, VK_MAX_DRIVER_INFO_SIZE);
    snprintf(properties->driverInfo, VK_MAX_DRIVER_INFO_SIZE,
             "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
+
+   /* We don't use image layouts, so every layout
+    * is supported for host copies.
+    */
+   static VkImageLayout supported_host_copy_layouts[] = {
+      VK_IMAGE_LAYOUT_GENERAL,
+      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      VK_IMAGE_LAYOUT_PREINITIALIZED,
+      VK_IMAGE_LAYOUT_ZERO_INITIALIZED_EXT,
+
+      /*  Vulkan 1.1 or VK_KHR_maintenance2 */
+      VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
+
+      /*  Vulkan 1.2 or VK_KHR_separate_depth_stencil_layouts */
+      VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL,
+
+      /* Vulkan 1.3 or VK_KHR_synchronization2 */
+      VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+
+      /* Vulkan 1.4 or VK_KHR_dynamic_rendering_local_read */
+      VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ,
+
+      /* VK_KHR_swapchain */
+      VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+
+      /* VK_EXT_attachment_feedback_loop_layout */
+      VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT,
+   };
+   properties->pCopySrcLayouts = supported_host_copy_layouts;
+   properties->copySrcLayoutCount = ARRAY_SIZE(supported_host_copy_layouts);
+   properties->pCopyDstLayouts = supported_host_copy_layouts;
+   properties->copyDstLayoutCount = ARRAY_SIZE(supported_host_copy_layouts);
+   properties->identicalMemoryTypeRequirements = true;
+
+   /* One tiling scheme across all V3D HW, so this only needs to change when
+    * the driver build does. driver_uuid is already derived from the build.
+    */
+   memcpy(properties->optimalTilingLayoutUUID, device->driver_uuid,
+          VK_UUID_SIZE);
 
 }
 
@@ -1502,6 +1597,9 @@ create_physical_device(struct v3dv_instance *instance,
          goto fail;
       }
    }
+
+   device->has_tfu_ccol = v3d_has_feature(device,
+                                          DRM_V3D_PARAM_SUPPORTS_TFU_CCOL);
 
    result = init_uuids(device);
    if (result != VK_SUCCESS)
@@ -2089,9 +2187,14 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
       }
    }
 
-   if (device->vk.enabled_features.nullDescriptor) {
+   if (device->vk.enabled_features.nullDescriptor ||
+       device->vk.enabled_features.maintenance6) {
+      const uint32_t null_bo_size =
+         device->vk.enabled_features.maintenance6 ?
+            V3DV_NULL_BO_SIZE_MAINTENANCE6 : 4096;
+
       device->null_bo =
-         v3dv_bo_alloc(device, 4096, "null texture data", true,
+         v3dv_bo_alloc(device, null_bo_size, "null texture data", true,
                        VK_OBJECT_TYPE_DEVICE,
                        vk_object_to_u64_handle(&device->vk.base));
       if (!device->null_bo ||
@@ -2125,10 +2228,6 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail;
 
    *pDevice = v3dv_device_to_handle(device);
-   v3dv_utrace_context_init(device);
-#ifdef HAVE_PERFETTO
-   v3dv_utrace_perfetto_init(device, V3DV_UTRACE_PERFETTO_QUEUE_COUNT);
-#endif
 
    return VK_SUCCESS;
 
@@ -2165,7 +2264,6 @@ v3dv_DestroyDevice(VkDevice _device,
 {
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
 
-   v3dv_utrace_context_fini(device);
    device->vk.dispatch_table.DeviceWaitIdle(_device);
    for (uint32_t i = 0; i < device->queue_count; i++)
       queue_finish(&device->queues[i]);
@@ -2311,6 +2409,14 @@ device_import_bo(struct v3dv_device *device,
    if (ret)
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
 
+#if USE_V3D_SIMULATOR
+   /* A handle we haven't imported yet may come from another DRM file, so
+    * the simulator doesn't know about it.
+    */
+   if (v3dv_device_lookup_bo(device->pdevice, handle)->refcnt == 0)
+      v3d_simulator_open_from_handle(render_fd, handle, real_size);
+#endif
+
    struct drm_v3d_get_bo_offset get_offset = {
       .handle = handle,
    };
@@ -2324,11 +2430,12 @@ device_import_bo(struct v3dv_device *device,
 
    v3dv_bo_init_import(*bo, handle, size, get_offset.offset, obj_type, obj_handle, false);
 
-   v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
-                                  true, /* is_alloc */
-                                  true, /* is_import */
-                                  handle, (*bo)->size,
-                                  obj_type, obj_handle);
+   vk_device_memory_report_emit(&device->vk, VK_SUCCESS,
+                                true, /* is_alloc */
+                                true, /* is_import */
+                                handle, (*bo)->size,
+                                obj_type, obj_handle,
+                                0 /* heap_index */);
    return VK_SUCCESS;
 }
 
@@ -2459,12 +2566,13 @@ v3dv_AllocateMemory(VkDevice _device,
    uint64_t heap_used = p_atomic_read(&pdevice->heap_used);
    if (unlikely(alloc_size > MAX_MEMORY_ALLOCATION_SIZE + 4096u ||
       heap_used + alloc_size > pdevice->memory.memoryHeaps[0].size)) {
-      v3dv_emit_device_memory_report(&device->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                                     true, /* is_alloc */
-                                     false, /* is_import */
-                                     0, /* mem_obj_id */
-                                     alloc_size, VK_OBJECT_TYPE_DEVICE_MEMORY,
-                                     0 /* obj_handle */ );
+      vk_device_memory_report_emit(&device->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                                   true, /* is_alloc */
+                                   false, /* is_import */
+                                   0, /* mem_obj_id */
+                                   alloc_size, VK_OBJECT_TYPE_DEVICE_MEMORY,
+                                   0, /* obj_handle */
+                                   0 /* heap_index */);
       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
@@ -2525,7 +2633,7 @@ v3dv_AllocateMemory(VkDevice _device,
       if (result == VK_SUCCESS)
          close(fd_info->fd);
    } else if (mem->vk.ahardware_buffer) {
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       const native_handle_t *handle = AHardwareBuffer_getNativeHandle(mem->vk.ahardware_buffer);
       assert(handle->numFds > 0);
       size_t size = lseek(handle->data[0], 0, SEEK_END);
@@ -2570,20 +2678,19 @@ v3dv_AllocateMemory(VkDevice _device,
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
-v3dv_MapMemory(VkDevice _device,
-               VkDeviceMemory _memory,
-               VkDeviceSize offset,
-               VkDeviceSize size,
-               VkMemoryMapFlags flags,
-               void **ppData)
+v3dv_MapMemory2KHR(VkDevice _device,
+                   const VkMemoryMapInfoKHR *pMemoryMapInfo,
+                   void **ppData)
 {
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
-   V3DV_FROM_HANDLE(v3dv_device_memory, mem, _memory);
+   V3DV_FROM_HANDLE(v3dv_device_memory, mem, pMemoryMapInfo->memory);
 
    if (mem == NULL) {
       *ppData = NULL;
       return VK_SUCCESS;
    }
+
+   const VkDeviceSize offset = pMemoryMapInfo->offset;
 
    assert(offset < mem->bo->size);
 
@@ -2600,17 +2707,18 @@ v3dv_MapMemory(VkDevice _device,
    return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL
-v3dv_UnmapMemory(VkDevice _device,
-                 VkDeviceMemory _memory)
+VKAPI_ATTR VkResult VKAPI_CALL
+v3dv_UnmapMemory2KHR(VkDevice _device,
+                     const VkMemoryUnmapInfoKHR *pMemoryUnmapInfo)
 {
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
-   V3DV_FROM_HANDLE(v3dv_device_memory, mem, _memory);
+   V3DV_FROM_HANDLE(v3dv_device_memory, mem, pMemoryUnmapInfo->memory);
 
    if (mem == NULL)
-      return;
+      return VK_SUCCESS;
 
    device_unmap(device, mem);
+   return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -2733,6 +2841,15 @@ v3dv_GetDeviceImageMemoryRequirements(
 }
 
 static void
+set_bind_status(const void *pNext, VkResult result)
+{
+   const VkBindMemoryStatusKHR *status =
+      vk_find_struct_const(pNext, BIND_MEMORY_STATUS_KHR);
+   if (status && status->pResult)
+      *status->pResult = result;
+}
+
+static void
 bind_image_memory(const VkBindImageMemoryInfo *info)
 {
    V3DV_FROM_HANDLE(v3dv_image, image, info->image);
@@ -2788,8 +2905,14 @@ v3dv_BindImageMemory2(VkDevice _device,
                       uint32_t bindInfoCount,
                       const VkBindImageMemoryInfo *pBindInfos)
 {
+   /* VK_KHR_maintenance6: we must attempt every bind even if some fail, and
+    * return the result of one of the failed ones.
+    */
+   VkResult ret = VK_SUCCESS;
+
    for (uint32_t i = 0; i < bindInfoCount; i++) {
-#if DETECT_OS_ANDROID
+      set_bind_status(pBindInfos[i].pNext, VK_SUCCESS);
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       V3DV_FROM_HANDLE(v3dv_image, image, pBindInfos[i].image);
       if (vk_image_is_android_hardware_buffer(&image->vk) ||
           vk_image_is_android_native_buffer_alias(&image->vk)) {
@@ -2818,20 +2941,32 @@ v3dv_BindImageMemory2(VkDevice _device,
                                                V3DV_MAX_PLANE_COUNT);
          }
 
-         if (result != VK_SUCCESS)
-            return result;
+         if (result != VK_SUCCESS) {
+            set_bind_status(pBindInfos[i].pNext, result);
+            if (ret == VK_SUCCESS)
+               ret = result;
+            continue;
+         }
 
          result = v3dv_update_image_layout(device, image,
                                            eci.drmFormatModifier,
                                            /* disjoint = */ false, &eci);
-         if (result != VK_SUCCESS)
-            return result;
+         if (result != VK_SUCCESS) {
+            set_bind_status(pBindInfos[i].pNext, result);
+            if (ret == VK_SUCCESS)
+               ret = result;
+            continue;
+         }
 
          if (vk_image_is_android_native_buffer_alias(&image->vk)) {
             result = vk_android_import_anb_memory(&device->vk, &image->vk, anb,
                                                   &device->vk.alloc);
-            if (result != VK_SUCCESS)
-               return result;
+            if (result != VK_SUCCESS) {
+               set_bind_status(pBindInfos[i].pNext, result);
+               if (ret == VK_SUCCESS)
+                  ret = result;
+               continue;
+            }
 
             VkBindImageMemoryInfo local_bind = pBindInfos[i];
             local_bind.memory = image->vk.anb_memory;
@@ -2846,7 +2981,7 @@ v3dv_BindImageMemory2(VkDevice _device,
          vk_find_struct_const(pBindInfos[i].pNext,
                               BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR);
       if (swapchain_info && swapchain_info->swapchain) {
-#if !DETECT_OS_ANDROID
+#ifndef VK_USE_PLATFORM_ANDROID_KHR
          VkDeviceMemory wsi_mem_handle = wsi_common_get_memory(
             swapchain_info->swapchain, swapchain_info->imageIndex);
          VkBindImageMemoryInfo swapchain_bind = {
@@ -2863,7 +2998,7 @@ v3dv_BindImageMemory2(VkDevice _device,
       }
    }
 
-   return VK_SUCCESS;
+   return ret;
 }
 
 void
@@ -2956,6 +3091,7 @@ v3dv_buffer_bind_memory(const VkBindBufferMemoryInfo *info)
 
    buffer->mem = mem;
    buffer->mem_offset = info->memoryOffset;
+   set_bind_status(info->pNext, VK_SUCCESS);
 }
 
 

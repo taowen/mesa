@@ -137,7 +137,6 @@ void r3xx_compile_fragment_program(struct r300_fragment_program_compiler *c);
 struct r300_vertex_program_compiler {
    struct radeon_compiler Base;
    struct r300_vertex_program_code *code;
-   uint32_t RequiredOutputs;
 
    void *UserData;
    void (*SetHwInputOutput)(struct r300_vertex_program_compiler *c);

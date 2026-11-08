@@ -312,9 +312,9 @@ anv_cmd_buffer_push_driver_values(struct anv_cmd_buffer *cmd_buffer,
          uint64_t addr64 = anv_address_physical(indirect_group);
          uint32_t lower_addr32 = addr64 & 0xffffffff;
          uint32_t upper_addr32 = addr64 >> 32;
-         UPDATE_PUSH(push->drv_data.cs.num_workgroups[0], UINT32_MAX);
-         UPDATE_PUSH(push->drv_data.cs.num_workgroups[1], lower_addr32);
-         UPDATE_PUSH(push->drv_data.cs.num_workgroups[2], upper_addr32);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[0], lower_addr32);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[1], upper_addr32);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[2], UINT32_MAX);
       }
    }
 
@@ -585,9 +585,9 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
       .push_addr64 = push_addr64,
       .base_wg = {0, 0, 0},
       .num_wg = {
-         UINT32_MAX,
          indirect_addr64 & 0xffffffff,
          indirect_addr64 >> 32,
+         UINT32_MAX,
       },
       .unaligned_x_offset = 0,
    };
@@ -604,6 +604,7 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
          .Post_sync_opn3.MOCS     = anv_mocs(device, NULL, 0),
       };
 
+      assert(comp_state->shader->bind_map.inline_dwords_count <= ARRAY_SIZE(body.InlineData));
       fill_inline_params(body.InlineData, &inline_value);
 
       cmd_buffer->state.last_indirect_dispatch =
@@ -629,6 +630,7 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
          },
       };
 
+      assert(comp_state->shader->bind_map.inline_dwords_count <= ARRAY_SIZE(body.InlineData));
       fill_inline_params(body.InlineData, &inline_value);
 
       cmd_buffer->state.last_indirect_dispatch =
@@ -681,9 +683,9 @@ emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
    };
    if (!anv_address_is_null(indirect_addr)) {
       uint64_t indirect_addr64 = anv_address_physical(indirect_addr);
-      inline_value.num_wg[0] = UINT32_MAX;
-      inline_value.num_wg[1] = indirect_addr64 & 0xffffffff;
-      inline_value.num_wg[2] = indirect_addr64 >> 32;
+      inline_value.num_wg[0] = indirect_addr64 & 0xffffffff;
+      inline_value.num_wg[1] = indirect_addr64 >> 32;
+      inline_value.num_wg[2] = UINT32_MAX;
    } else {
       inline_value.num_wg[0] = num_wg[0];
       inline_value.num_wg[1] = num_wg[1];
@@ -1437,7 +1439,8 @@ cmd_buffer_flush_rt_state(struct anv_cmd_buffer *cmd_buffer,
                                                               scratch_size,
                                                               false);
       }
-#if INTEL_NEEDS_WA_14017794102 || INTEL_NEEDS_WA_14023061436
+#if INTEL_NEEDS_WA_14017794102 || INTEL_NEEDS_WA_14023061436 || GFX_VER >= 35
+      /* GFX35+: Bspec 73592 (r77799) HSD 14023364992 */
       btd.BTDMidthreadpreemption = false;
 #endif
 
@@ -1658,11 +1661,13 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
          .Post_sync_opn3.MOCS            = anv_mocs(device, NULL, 0),
          .InterfaceDescriptor            = (struct GENX(INTERFACE_DESCRIPTOR_DATA_2)) {
             .KernelStartPointer                =
-               anv_shader_internal_get_pointer(device, device->rt_trampoline),
+               anv_shader_get_pointer(device, &device->rt_trampoline->kernel),
             .RegistersPerThread                = intel_register_blocks(device->info, cs_prog_data->base.grf_used),
             .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
             .ThreadGroupDispatchSize           = intel_compute_threads_group_dispatch_size_walker_2(dispatch.threads),
             .BTDmode                           = true,
+            /* GFX35+: Bspec 73592 (r77799) HSD 14023364992 */
+            .ThreadPreemption                  = false,
             .PSAsyncThreadLimit                = cmd_buffer->state.compute.pixel_async_compute_thread_limit,
             .ZPassAsyncComputeThreadLimit      = cmd_buffer->state.compute.z_pass_async_compute_thread_limit,
             .NP_ZAsyncThrottlesettings         = cmd_buffer->state.compute.np_z_async_throttle_settings,
@@ -1702,12 +1707,13 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
 #endif
 
          .InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA)) {
-            .KernelStartPointer = anv_shader_internal_get_pointer(device, device->rt_trampoline),
+            .KernelStartPointer = anv_shader_get_pointer(device, &device->rt_trampoline->kernel),
             .NumberofThreadsinGPGPUThreadGroup = threads_per_group,
             .ThreadGroupDispatchSize =
                intel_compute_threads_group_dispatch_size(threads_per_group),
             .BTDMode = true,
-#if INTEL_NEEDS_WA_14017794102 || INTEL_NEEDS_WA_14023061436
+#if INTEL_NEEDS_WA_14017794102 || INTEL_NEEDS_WA_14023061436 || GFX_VER >= 35
+            /* GFX35+: Bspec 73592 (r77799) HSD 14023364992 */
             .ThreadPreemption = false,
 #endif
 #if GFX_VER >= 30

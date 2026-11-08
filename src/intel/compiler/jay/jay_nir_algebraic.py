@@ -26,26 +26,39 @@ for sz in (16, 32, 64):
         (('inot', ('ior(is_used_once)', f'a@{sz}', b)), ('iand', ('inot', a), ('inot', b))),
     ])
 
-lower_fsign = [
+lower_algebraic = [
     (('fsign', a), ('bcsel', ('!flt', 0, a), +1.0,
                     ('bcsel', ('!flt', a, 0), -1.0, 0.0))),
     (('fceil', a), ('fneg', ('ffloor', ('fneg', a)))),
 
+    (('isub_sat', a, 0), a),
+    (('isub_sat', a, '#b(is_not_int_min)'), ('isub_sat_intel', a, b)),
+
+    # Split b so neither part is INT_MIN and both can be negated at the
+    # source bit size.  The parts have the same sign, so intermediate
+    # saturation does not change the result.
+    (('isub_sat', a, b),
+     ('isub_sat_intel', ('isub_sat_intel', a, ('ishr', b, 1)),
+      ('iadd', b, ('ineg', ('ishr', b, 1))))),
+
     # Remove the zeroing. Down-conversion is free but extracts are not.
     (('u2f32', ('extract_u8', a, 0)), ('u2f32', ('u2u8', a))),
     (('u2f32', ('extract_u16', a, 0)), ('u2f32', ('u2u16', a))),
-    (('i2f32', ('extract_i8', a, 0)), ('i2f32', ('i2i8', a))),
-    (('i2f32', ('extract_i16', a, 0)), ('i2f32', ('i2i16', a))),
+    (('i2f32', ('extract_i8', a, 0)), ('i2f32', ('u2u8', a))),
+    (('i2f32', ('extract_i16', a, 0)), ('i2f32', ('u2u16', a))),
+    (('i2f32', ('extract_u8', 'a@16', 0)), ('u2f32', ('u2u8', a))),
+    (('i2f32', ('extract_u8', 'a@32', 0)), ('u2f32', ('u2u8', a))),
+    (('i2f32', ('extract_u16', 'a@32', 0)), ('u2f32', ('u2u16', a))),
 ]
 
 for s in range(1, 31):
     mask = 0xffffffff << s
-    lower_fsign.extend([
+    lower_algebraic.extend([
         (('iadd', ('ishl', 'a@32', s), ('iand', 'b@32', ~mask)),
          ('bfi', mask, a, b))
     ])
 
-lower_fsign.extend([
+lower_algebraic.extend([
     # Late multiplication handling
     (('iadd', ('imul_32x16(is_only_used_by_iadd)', a, b), c),
      ('imad_32x16_intel', a, b, c)),
@@ -71,12 +84,17 @@ lower_fsign.extend([
      ('pack_32_2x16_split', ('f2f16', a), ('f2f16', b))),
 ])
 
-for i in range(2, 15):
-    lower_fsign.extend([
+# Fuse iadd+ishl. Prefer imad over umad so we can fold more modifiers.
+for i in range(2, 14):
+    lower_algebraic.extend([
         (('iadd', ('ishl(is_only_used_by_iadd)', 'b@32', i), c),
-         ('umad_32x16_intel', b, 1 << i, c)),
+         ('imad_32x16_intel', b, 1 << i, c)),
     ])
 
+lower_algebraic.extend([
+    (('iadd', ('ishl(is_only_used_by_iadd)', 'b@32', i), c),
+     ('umad_32x16_intel', b, 1 << 15, c)),
+])
 
 lower_bool = [
     # Try to use conditional modifiers more
@@ -133,7 +151,7 @@ def main() -> None:
         f.write('#include "jay_private.h"')
 
         f.write(nir_algebraic.AlgebraicPass(
-            "jay_nir_lower_fsign", opt_bool + lower_fsign,
+            "jay_nir_lower_algebraic", opt_bool + lower_algebraic,
             [("unsigned", "verx10")]).render())
         f.write(nir_algebraic.AlgebraicPass(
             "jay_nir_lower_bool", lower_bool).render())

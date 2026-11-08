@@ -57,7 +57,7 @@ kopper_init_screen(struct dri_screen *screen, bool driver_name_is_inferred)
 {
    struct pipe_screen *pscreen = NULL;
 
-   if (!screen->kopper_loader) {
+   if (!screen->loader.kopper) {
       fprintf(stderr, "mesa: Kopper interface not found!\n"
                       "      Ensure the versions of %s built with this version of Zink are\n"
                       "      in your library path!\n", KOPPER_LIB_NAMES);
@@ -89,12 +89,6 @@ kopper_init_screen(struct dri_screen *screen, bool driver_name_is_inferred)
 }
 
 // copypasta alert
-
-extern bool
-dri_image_drawable_get_buffers(struct dri_drawable *drawable,
-                               struct __DRIimageList *images,
-                               const enum st_attachment_type *statts,
-                               unsigned statts_count);
 
 #ifdef VK_USE_PLATFORM_XCB_KHR
 /* Translate from the pipe_format enums used by Gallium to the DRM FourCC
@@ -168,7 +162,7 @@ kopper_get_pixmap_buffer(struct dri_drawable *drawable,
 }
 #endif //VK_USE_PLATFORM_XCB_KHR
 
-static void
+void
 kopper_allocate_textures(struct dri_context *ctx,
                          struct dri_drawable *drawable,
                          const enum st_attachment_type *statts,
@@ -180,7 +174,7 @@ kopper_allocate_textures(struct dri_context *ctx,
    bool resized;
    unsigned i;
    struct __DRIimageList images;
-   const __DRIimageLoaderExtension *image = screen->image.loader;
+   const __DRIimageLoaderExtension *image = screen->loader.image;
 
    bool is_window = drawable->is_window;
    bool is_pixmap = !is_window && drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
@@ -195,45 +189,8 @@ kopper_allocate_textures(struct dri_context *ctx,
       if (!dri_image_drawable_get_buffers(drawable, &images,
                                           statts, statts_count))
          return;
-   }
 
-   if (image) {
-      if (images.image_mask & __DRI_IMAGE_BUFFER_FRONT) {
-         struct pipe_resource **buf =
-            &drawable->textures[ST_ATTACHMENT_FRONT_LEFT];
-         struct pipe_resource *texture = images.front->texture;
-
-         drawable->w = texture->width0;
-         drawable->h = texture->height0;
-
-         pipe_resource_reference(buf, texture);
-      }
-
-      if (images.image_mask & __DRI_IMAGE_BUFFER_BACK) {
-         struct pipe_resource **buf =
-            &drawable->textures[ST_ATTACHMENT_BACK_LEFT];
-         struct pipe_resource *texture = images.back->texture;
-
-         drawable->w = texture->width0;
-         drawable->h = texture->height0;
-
-         pipe_resource_reference(buf, texture);
-      }
-
-      if (images.image_mask & __DRI_IMAGE_BUFFER_SHARED) {
-         struct pipe_resource **buf =
-            &drawable->textures[ST_ATTACHMENT_BACK_LEFT];
-         struct pipe_resource *texture = images.back->texture;
-
-         drawable->w = texture->width0;
-         drawable->h = texture->height0;
-
-         pipe_resource_reference(buf, texture);
-
-         ctx->is_shared_buffer_bound = true;
-      } else {
-         ctx->is_shared_buffer_bound = false;
-      }
+      ctx->is_shared_buffer_bound = dri_drawable_bind_images(ctx, drawable, &images);
    }
 
    /* check size after possible loader image resize */
@@ -322,6 +279,8 @@ XXX do this once swapinterval is hooked up
             /* A failed swapchain is not a usable offscreen window buffer. */
             if (!drawable->window_valid)
                return;
+            if (drawable->textures[statts[i]] && (attachments & ST_ATTACHMENT_FRONT_LEFT_MASK))
+               zink_kopper_set_front(drawable->textures[statts[i]], statts[i] == ST_ATTACHMENT_FRONT_LEFT);
          }
 #ifdef VK_USE_PLATFORM_XCB_KHR
          else if (is_pixmap && statts[i] == ST_ATTACHMENT_FRONT_LEFT && !screen->is_sw) {
@@ -352,13 +311,13 @@ XXX do this once swapinterval is hooked up
 static inline void
 get_drawable_info(struct dri_drawable *drawable, int *w, int *h)
 {
-   const __DRIkopperLoaderExtension *loader = drawable->screen->kopper_loader;
+   const __DRIkopperLoaderExtension *loader = drawable->screen->loader.kopper;
 
    if (loader)
       loader->GetDrawableInfo(drawable, w, h, drawable->loaderPrivate);
 }
 
-static void
+void
 kopper_update_drawable_info(struct dri_drawable *drawable)
 {
    struct dri_screen *screen = drawable->screen;
@@ -368,9 +327,19 @@ kopper_update_drawable_info(struct dri_drawable *drawable)
                                 drawable->textures[ST_ATTACHMENT_FRONT_LEFT];
 
    bool do_kopper_update = is_window && ptex && screen->fd == -1;
-   if (drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR && do_kopper_update)
-      zink_kopper_update(kopper_get_zink_screen(screen->base.screen), ptex, &drawable->w, &drawable->h);
-   else
+   /* skip the blocking size query if the loader knows the window was not resized */
+   const __DRIkopperLoaderExtension *loader = screen->loader.kopper;
+   uint32_t serial = 0;
+   if (do_kopper_update && loader && loader->GetResizeSerial) {
+      serial = loader->GetResizeSerial(drawable->loaderPrivate);
+      if (serial && drawable->w && drawable->h && serial == drawable->kopper_resize_serial)
+         return;
+   }
+   if (drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR && do_kopper_update) {
+      /* set after the query, a resize seen meanwhile changes the serial again */
+      if (zink_kopper_update(kopper_get_zink_screen(screen->base.screen), ptex, &drawable->w, &drawable->h))
+         drawable->kopper_resize_serial = serial;
+   } else
       get_drawable_info(drawable, &drawable->w, &drawable->h);
 }
 
@@ -396,7 +365,7 @@ kopper_copy_to_front(struct pipe_context *pipe,
    p_atomic_inc(&drawable->base.stamp);
 }
 
-static bool
+bool
 kopper_flush_frontbuffer(struct dri_context *ctx,
                          struct dri_drawable *drawable,
                          enum st_attachment_type statt)
@@ -448,45 +417,26 @@ kopper_flush_frontbuffer(struct dri_context *ctx,
    return true;
 }
 
-static void
+void
 kopper_update_tex_buffer(struct dri_drawable *drawable,
                          struct dri_context *ctx,
                          struct pipe_resource *res)
 {
    struct dri_screen *screen = drawable->screen;
-   if (screen->has_dmabuf || drawable->is_window || drawable->info.bos.sType != VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR)
+   if (!screen->loader.swrast || screen->has_dmabuf || drawable->is_window ||
+       drawable->info.bos.sType != VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR)
       return;
    drisw_update_tex_buffer(drawable, ctx, res);
 }
-
-static void
-kopper_flush_swapbuffers(struct dri_context *ctx,
-                         struct dri_drawable *drawable)
-{
-   /* does this actually need to do anything? */
-}
-
-static void
-kopper_swap_buffers(struct dri_drawable *drawable);
-static void
-kopper_swap_buffers_with_damage(struct dri_drawable *drawable, int nrects, const int *rects);
 
 void
 kopper_init_drawable(struct dri_drawable *drawable, bool isPixmap, int alphaBits)
 {
    struct dri_screen *screen = drawable->screen;
 
-   drawable->allocate_textures = kopper_allocate_textures;
-   drawable->update_drawable_info = kopper_update_drawable_info;
-   drawable->flush_frontbuffer = kopper_flush_frontbuffer;
-   drawable->update_tex_buffer = kopper_update_tex_buffer;
-   drawable->flush_swapbuffers = kopper_flush_swapbuffers;
-   drawable->swap_buffers = kopper_swap_buffers;
-   drawable->swap_buffers_with_damage = kopper_swap_buffers_with_damage;
-
    drawable->info.has_alpha = alphaBits > 0;
-   if (screen->kopper_loader->SetSurfaceCreateInfo)
-      screen->kopper_loader->SetSurfaceCreateInfo(drawable->loaderPrivate,
+   if (screen->loader.kopper->SetSurfaceCreateInfo)
+      screen->loader.kopper->SetSurfaceCreateInfo(drawable->loaderPrivate,
                                                   &drawable->info);
    drawable->is_window = !isPixmap && drawable->info.bos.sType != 0;
    if (drawable->is_window)
@@ -499,14 +449,10 @@ kopper_init_drawable(struct dri_drawable *drawable, bool isPixmap, int alphaBits
       VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos;
       xcb_connection_t *conn = xcb->connection;
 
-      int32_t eid = xcb_generate_id(conn);
-      if (drawable->is_window) {
-         xcb_present_select_input(conn, eid, xcb->window,
-                                  XCB_PRESENT_EVENT_MASK_COMPLETE_NOTIFY);
-      }
-
+      drawable->present_eid = xcb_generate_id(conn);
       drawable->special_event =
-         xcb_register_for_special_xge(conn, &xcb_present_id, eid, NULL);
+         xcb_register_for_special_xge(conn, &xcb_present_id,
+                                      drawable->present_eid, NULL);
    }
 #endif
 }
@@ -527,7 +473,7 @@ kopper_destroy_drawable(struct dri_drawable *drawable)
 }
 
 int64_t
-kopperSwapBuffersWithDamage(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects)
+kopperSwapBuffers(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects)
 {
    struct dri_context *ctx = dri_get_current();
    struct pipe_resource *ptex;
@@ -545,8 +491,9 @@ kopperSwapBuffersWithDamage(struct dri_drawable *drawable, uint32_t flush_flags,
 
    drawable->texture_stamp = drawable->lastStamp - 1;
 
+   /* only windows present, and the present syncs tc after the flush is queued */
    dri_flush(ctx, drawable,
-             __DRI2_FLUSH_DRAWABLE | flush_flags,
+             __DRI2_FLUSH_DRAWABLE | (drawable->is_window ? __DRI2_FLUSH_ASYNC : 0) | flush_flags,
              __DRI2_THROTTLE_SWAPBUFFER);
 
    struct pipe_box stack_boxes[64];
@@ -570,33 +517,15 @@ kopperSwapBuffersWithDamage(struct dri_drawable *drawable, uint32_t flush_flags,
    /* have to manually swap the pointers here to make frontbuffer readback work */
    drawable->textures[ST_ATTACHMENT_BACK_LEFT] = drawable->textures[ST_ATTACHMENT_FRONT_LEFT];
    drawable->textures[ST_ATTACHMENT_FRONT_LEFT] = ptex;
+   zink_kopper_set_front(drawable->textures[ST_ATTACHMENT_BACK_LEFT], false);
+   zink_kopper_set_front(ptex, true);
 
    return 0;
-}
-
-int64_t
-kopperSwapBuffers(struct dri_drawable *dPriv, uint32_t flush_flags)
-{
-   return kopperSwapBuffersWithDamage(dPriv, flush_flags, 0, NULL);
-}
-
-static void
-kopper_swap_buffers_with_damage(struct dri_drawable *drawable, int nrects, const int *rects)
-{
-
-   kopperSwapBuffersWithDamage(drawable, 0, nrects, rects);
-}
-
-static void
-kopper_swap_buffers(struct dri_drawable *drawable)
-{
-   kopper_swap_buffers_with_damage(drawable, 0, NULL);
 }
 
 void
 kopperSetSwapInterval(struct dri_drawable *drawable, int interval)
 {
-   struct dri_screen *screen = drawable->screen;
    struct pipe_resource *ptex = drawable->textures[ST_ATTACHMENT_BACK_LEFT] ?
                                 drawable->textures[ST_ATTACHMENT_BACK_LEFT] :
                                 drawable->textures[ST_ATTACHMENT_FRONT_LEFT];
@@ -610,8 +539,9 @@ kopperSetSwapInterval(struct dri_drawable *drawable, int interval)
     * the swapchain is eventually created.
     */
    if (ptex && zink_kopper_check(ptex)) {
-      struct pipe_screen *pscreen = kopper_get_zink_screen(screen->base.screen);
-      zink_kopper_set_swap_interval(pscreen, ptex, interval);
+      struct dri_context *ctx = dri_get_current();
+      _mesa_glthread_finish(ctx->st->ctx);
+      zink_kopper_set_swap_interval(ctx->st->pipe, ptex, interval);
    }
 }
 
@@ -654,6 +584,11 @@ kopperGetSyncValues(struct dri_drawable *drawable, int64_t target_msc, int64_t d
    VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&info->bos;
    xcb_connection_t *conn = xcb->connection;
 
+   if (!drawable->is_window)
+      return 0;
+
+   xcb_present_select_input(conn, drawable->present_eid, xcb->window,
+                            XCB_PRESENT_EVENT_MASK_COMPLETE_NOTIFY);
    xcb_void_cookie_t cookie =
       xcb_present_notify_msc(conn, xcb->window, 0, target_msc, divisor, remainder);
 
@@ -686,6 +621,8 @@ kopperGetSyncValues(struct dri_drawable *drawable, int64_t target_msc, int64_t d
 
       free(event);
    }
+
+   xcb_present_select_input(conn, drawable->present_eid, xcb->window, 0);
 
    return ret;
 #else

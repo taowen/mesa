@@ -116,7 +116,7 @@ struct blorp_surface_info
    /* Z offset into a 3-D texture or slice of a 2-D array texture. */
    float z_offset;
 
-   uint32_t tile_x_sa, tile_y_sa;
+   uint32_t tile_x_sa, tile_y_sa, tile_z_sa;
 };
 
 void
@@ -212,6 +212,23 @@ struct blorp_wm_inputs_clear {
    struct blorp_bounds_rect bounds_rect;
 };
 
+struct blorp_wm_inputs_mem_copy {
+   /* Source buffer aaddress. */
+   uint64_t src_addr;
+
+   /* Destination buffer address. */
+   uint64_t dst_addr;
+
+   /* Copy size. */
+   uint64_t size;
+
+   /* Width refers to how a buffer is split into a 2D surface for fragment
+    * shaders. This is used to calculate a "global invocation ID" based on the
+    * fragment coordinates.
+    */
+   uint32_t width;
+};
+
 /* Parameters using in blorp_indirect_copy.c */
 struct blorp_wm_inputs_indirect {
    /* The address of the indirect buffer containing the information about the
@@ -254,6 +271,7 @@ struct blorp_wm_inputs
    union {
       struct blorp_wm_inputs_blit blit;
       struct blorp_wm_inputs_clear clear;
+      struct blorp_wm_inputs_mem_copy mem_copy;
       struct blorp_wm_inputs_indirect indirect;
    };
 
@@ -296,7 +314,8 @@ struct blorp_vs_inputs {
 };
 
 enum blorp_shader_type {
-   BLORP_SHADER_TYPE_COPY,
+   BLORP_SHADER_TYPE_MEM_COPY,
+   BLORP_SHADER_TYPE_BLIT_COPY,
    BLORP_SHADER_TYPE_BLIT,
    BLORP_SHADER_TYPE_CLEAR,
    BLORP_SHADER_TYPE_MCS_PARTIAL_RESOLVE,
@@ -492,7 +511,7 @@ blorp_op_type_is_blit(enum blorp_op op)
 {
    switch (op) {
    case BLORP_OP_BLIT:
-   case BLORP_OP_COPY:
+   case BLORP_OP_BLIT_COPY:
       return true;
    default:
       return false;

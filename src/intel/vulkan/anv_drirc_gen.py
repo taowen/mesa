@@ -21,6 +21,7 @@ def declare_options(android_version):
     U64 = drirc_gen.DrircUint64
     E = drirc_gen.DrircEnum
     EV = drirc_gen.DrircEnumValue
+    S = drirc_gen.DrircString
 
     debug_options = [
         # Workaround subgroups
@@ -80,6 +81,9 @@ def declare_options(android_version):
         B("anv_emulate_divergent_barriers", False,
           "Temporary workaround for a broken shader in some recent RE engine games",
           c_name="emulate_divergent_barriers"),
+        B("anv_force_exact_glsl_fma", False,
+          "Disallow contract/reassociation for GLSLstd450Fma.",
+          c_name="force_exact_glsl_fma"),
 
         # Workaround various driver
         B("always_flush_cache", False,
@@ -126,7 +130,9 @@ def declare_options(android_version):
         B("anv_write_lookup_maps_unconditionally", False,
           "Unconditionally write lookup maps for BLAS update operation",
           c_name="write_lookup_maps_unconditionally"),
-
+        B("anv_disable_xe_engine_cycles", False,
+          "Disable use of DRM_XE_DEVICE_QUERY_ENGINE_CYCLES on Xe",
+          c_name="disable_xe_engine_cycles"),
         # Workaround command emission
         B("anv_barrier_post_untyped_clear_shader", False,
           "Insert pipeline barriers post clearing shader on untyped data",
@@ -176,6 +182,12 @@ def declare_options(android_version):
         I("query_copy_with_shader_threshold", 6, 0, 0x7fffffff,
           "Query threshold count above which query copies are executed with a shader",
           c_name="query_copy_with_shader_threshold"),
+        B("anv_disable_jay", False,
+          "Disable Jay and fall back to the brw compiler",
+          c_name="disable_jay"),
+        S("anv_queue_override",
+          description="Override exposed queue families & counts",
+          c_name="queue_override"),
 
         B("anv_enable_alloc_oversubscription", True,
           "Allow the optional alignment of allocation sizes to large page sizes",
@@ -215,11 +227,23 @@ def declare_options(android_version):
         B("intel_force_sampler_prefetch", False,
           "Enable binding table sampler prefteching",
           c_name="sampler_prefetch"),
+        E("intel_code_motion", 0, 0, 2,
+          [EV(0, "compiler default"),
+           EV(1, "nir_opt_licm, hoist out of loops only"),
+           EV(2, "nir_opt_gcm, global code motion")],
+          "Which code motion pass runs in the NIR optimization loop",
+          c_name="code_motion"),
 
         B("force_guc_low_latency", False,
           "Enable low latency GuC strategy.",
           c_name="guc_low_latency"),
-
+        E("anv_sample_d_performance", 0, 0, 3,
+          [EV(0, "Disable_sample_d_optimization"),
+           EV(1, "sample_d_ignore12b"),
+           EV(2, "sample_d_ignore16b"),
+           EV(3, "sample_d_ignore20b")],
+          "SAMPLER_STATE::anv_sample_d_performance",
+          c_name="sample_d_performance"),
         E("anv_stack_ids", 512, 256, 2048,
           [EV(256,  "256 stackids"),
            EV(512,  "512 stackids"),

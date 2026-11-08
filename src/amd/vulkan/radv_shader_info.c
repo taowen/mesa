@@ -302,6 +302,7 @@ gather_intrinsic_info(const nir_shader *nir, const nir_intrinsic_instr *instr, s
    case nir_intrinsic_vulkan_resource_index:
       info->desc_set_used_mask |= (1u << nir_intrinsic_desc_set(instr));
       break;
+   case nir_intrinsic_image_deref_descriptor_amd:
    case nir_intrinsic_image_deref_load:
    case nir_intrinsic_image_deref_sparse_load:
    case nir_intrinsic_image_deref_store:
@@ -325,6 +326,9 @@ gather_intrinsic_info(const nir_shader *nir, const nir_intrinsic_instr *instr, s
       break;
    case nir_intrinsic_load_poly_line_smooth_enabled:
       info->ps.needs_poly_line_smooth = true;
+      break;
+   case nir_intrinsic_load_poly_line_smooth_coverage:
+      info->ps.needs_poly_line_smooth_coverage = true;
       break;
    case nir_intrinsic_begin_invocation_interlock:
       info->ps.pops = true;
@@ -582,7 +586,6 @@ gather_shader_info_vs(const struct radv_compiler_info *compiler_info, const nir_
     */
    info->vs.needs_instance_id |= info->vs.has_prolog;
    info->vs.needs_base_instance |= info->vs.has_prolog;
-   info->vs.needs_draw_id |= info->vs.has_prolog;
 
    if (info->vs.dynamic_inputs) {
       info->vs.num_attributes = util_last_bit(info->vs.vb_desc_usage_mask);
@@ -814,6 +817,26 @@ calc_mesh_workgroup_size(const struct radv_compiler_info *compiler_info, const n
    }
 }
 
+bool
+radv_force_disable_vrs(enum amd_gfx_level gfx_level, const struct nir_shader *nir,
+                       const struct radv_graphics_state_key *gfx_state)
+{
+   /* Disable VRS in these cases:
+    *
+    * - if the fragment shader reads gl_SampleMaskIn or writes gl_SampleMask because we expose
+    *   fragmentShadingRateWithShaderSampleMask = VK_FALSE because the SAMPLE_COVERAGE PS VGPR only contains a
+    *   16-bit sample coverage mask, which isn't enough for 8xMSAA and 2x2 coarse shading (we no longer support
+    *   8xMSAA, so we could allow gl_SampleMaskIn with VRS now).
+    * - on GFX10.3, if the fragment shader requests a fragment interlock execution mode even if the ordered
+    *   section was optimized out, to consistently implement fragmentShadingRateWithFragmentShaderInterlock =
+    *   VK_FALSE.
+    */
+   return gfx_state->ms.sample_shading_enable || nir->info.fs.uses_sample_shading ||
+          nir->info.fs.sample_mask_in_declared || nir->info.fs.sample_mask_out_declared ||
+          (gfx_level == GFX10_3 && (nir->info.fs.sample_interlock_ordered || nir->info.fs.sample_interlock_unordered ||
+                                    nir->info.fs.pixel_interlock_ordered || nir->info.fs.pixel_interlock_unordered));
+}
+
 static void
 gather_shader_info_fs(enum amd_gfx_level gfx_level, const nir_shader *nir,
                       const struct radv_graphics_state_key *gfx_state, struct radv_shader_info *info)
@@ -852,6 +875,7 @@ gather_shader_info_fs(enum amd_gfx_level gfx_level, const nir_shader *nir,
    info->ps.allow_flat_shading =
       !(uses_persp_or_linear_interp || info->ps.needs_sample_positions || info->ps.reads_frag_shading_rate ||
         info->ps.writes_memory || nir->info.fs.needs_coarse_quad_helper_invocations ||
+        info->ps.needs_poly_line_smooth_coverage ||
         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRAG_COORD_XY) ||
         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRAG_COORD_Z) ||
         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRAG_COORD_W_RCP) ||
@@ -883,9 +907,9 @@ gather_shader_info_fs(enum amd_gfx_level gfx_level, const nir_shader *nir,
       (gfx_state->ps.depth_output_needs_epilog && info->ps.writes_z) ||
       (gfx_state->ps.stencil_output_needs_epilog && info->ps.writes_stencil) ||
       (gfx_state->ps.sample_mask_output_needs_epilog && info->ps.writes_sample_mask) ||
-      (writes_mrt0_alpha && ((gfx_level >= GFX11 && gfx_state->ms.alpha_to_coverage_unknown &&
-                              radv_ps_writes_mrtz(info)) ||
-                             (gfx_state->ms.alpha_to_coverage_unknown && gfx_state->ms.alpha_to_one_enable)));
+      (writes_mrt0_alpha &&
+       ((gfx_level >= GFX11 && gfx_state->ms.alpha_to_coverage_unknown && radv_ps_writes_mrtz(info)) ||
+        (gfx_state->ms.alpha_to_coverage_unknown && gfx_state->ms.alpha_to_one_enable)));
 
    if (!info->ps.has_epilog) {
       info->ps.mrt0_is_dual_src = gfx_state->ps.epilog.mrt0_is_dual_src;
@@ -899,25 +923,11 @@ gather_shader_info_fs(enum amd_gfx_level gfx_level, const nir_shader *nir,
 
       info->ps.writes_mrt0_alpha_to_mrtz =
          writes_mrt0_alpha && gfx_state->ms.alpha_to_coverage_enable &&
-         ((gfx_level >= GFX11 && radv_ps_writes_mrtz(info)) ||
-          gfx_state->ms.alpha_to_one_enable);
+         ((gfx_level >= GFX11 && radv_ps_writes_mrtz(info)) || gfx_state->ms.alpha_to_one_enable);
    }
 
    if (gfx_level >= GFX10_3) {
-      /* Disable VRS in these cases:
-       *
-       * - if the fragment shader reads gl_SampleMaskIn because we expose fragmentShadingRateWithShaderSampleMask =
-       *   VK_FALSE because the SAMPLE_COVERAGE PS VGPR only contains a 16-bit sample coverage mask, which isn't
-       *   enough for 8xMSAA and 2x2 coarse shading (we no longer support 8xMSAA, so we could allow gl_SampleMaskIn
-       *   with VRS now).
-       * - on GFX10.3, if the fragment shader requests a fragment interlock execution mode even if the ordered
-       *   section was optimized out, to consistently implement fragmentShadingRateWithFragmentShaderInterlock =
-       *   VK_FALSE.
-       */
-      info->ps.force_disable_vrs =
-         gfx_state->ms.sample_shading_enable || info->ps.uses_sample_shading || nir->info.fs.sample_mask_in_declared ||
-         (gfx_level == GFX10_3 && (nir->info.fs.sample_interlock_ordered || nir->info.fs.sample_interlock_unordered ||
-                                   nir->info.fs.pixel_interlock_ordered || nir->info.fs.pixel_interlock_unordered));
+      info->ps.force_disable_vrs = radv_force_disable_vrs(gfx_level, nir, gfx_state);
 
       /* Do not enable if the PS uses gl_FragCoord because it breaks postprocessing in some games. */
       info->ps.disallow_force_vrs_per_vertex =
@@ -1108,7 +1118,7 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const 
       outinfo->export_prim_id_per_primitive = per_prim_mask & VARYING_BIT_PRIMITIVE_ID;
    }
 
-   info->vs.needs_draw_id |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID);
+   info->needs_draw_id |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID);
    info->vs.needs_base_instance |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_BASE_INSTANCE);
    info->vs.needs_instance_id |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_INSTANCE_ID);
    info->uses_view_index |= BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_VIEW_INDEX);
@@ -1540,6 +1550,7 @@ radv_nir_shader_info_merge(const struct radv_shader_stage *src, struct radv_shad
    dst_info->desc_set_used_mask |= src_info->desc_set_used_mask;
    dst_info->uses_view_index |= src_info->uses_view_index;
    dst_info->uses_prim_id |= src_info->uses_prim_id;
+   dst_info->needs_draw_id |= src_info->needs_draw_id;
    dst_info->inline_push_constant_mask |= src_info->inline_push_constant_mask;
 
    /* Only inline all push constants if both allows it. */

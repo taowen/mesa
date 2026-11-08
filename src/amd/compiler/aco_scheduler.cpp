@@ -24,7 +24,7 @@
 /* creating clauses decreases def-use distances, so make it less aggressive the lower num_waves is */
 #define VMEM_CLAUSE_MAX_GRAB_DIST       (ctx.occupancy_factor * 2)
 #define VMEM_STORE_CLAUSE_MAX_GRAB_DIST (ctx.occupancy_factor * 4)
-#define POS_EXP_MAX_MOVES         512
+#define POS_EXP_MAX_MOVES               512
 
 namespace aco {
 
@@ -523,7 +523,8 @@ memory_sync_info
 get_sync_info_with_hack(const Instruction* instr)
 {
    memory_sync_info sync = get_sync_info(instr);
-   if (instr->isSMEM() && !instr->operands.empty() && instr->operands[0].bytes() == 16) {
+   if (instr->isSMEM() && !instr->operands.empty() && instr->operands[0].bytes() == 16 &&
+       (!sync.storage || (sync.semantics & semantic_private))) {
       // FIXME: currently, it doesn't seem beneficial to omit this due to how our scheduler works
       sync.storage = (storage_class)(sync.storage | storage_buffer);
       sync.semantics =

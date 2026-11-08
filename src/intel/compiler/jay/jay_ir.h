@@ -84,8 +84,17 @@ jay_normalize_uflag(enum jay_file x)
 #define JAY_MAX_SAMPLER_MESSAGE_SIZE (11)
 #define JAY_MAX_PHYS_GRF             (256)
 #define JAY_MAX_ACCUMS               (4)
+#define JAY_NR_POSTRA_LIVE           (JAY_MAX_ACCUMS + (JAY_MAX_PHYS_GRF * 2))
 #define JAY_NUM_UGPR                 (1024)
 #define JAY_REG_BITS                 (17)
+
+/*
+ * Represents the size of a single Jay index.
+ */
+enum jay_size {
+   JAY_SIZE_16 = 0,
+   JAY_SIZE_32 = 1,
+};
 
 /*
  * An jay_def represents a contiguous array of registers or a 32-bit immediate.
@@ -116,9 +125,6 @@ typedef struct jay_def {
     */
    unsigned reg:JAY_REG_BITS;
 
-   /* (Post-RA) only, access only the top half of the indexed 32-bit register */
-   bool hi:1;
-
    /** The associated file (must be < JAY_NUM_SSA_FILES for SSA) */
    enum jay_file file:4;
 
@@ -142,6 +148,9 @@ typedef struct jay_def {
     * maintaining the canonical form.
     */
    bool collect:1;
+
+   /* The size of the individual SSA values. Unit for num_values_m1 */
+   enum jay_size size:1;
 } jay_def;
 static_assert(sizeof(jay_def) == 8, "packed");
 
@@ -158,6 +167,7 @@ jay_bare_regs(enum jay_file file, uint16_t reg, unsigned count)
       .reg = reg,
       .file = file,
       .num_values_m1 = count - 1,
+      .size = JAY_SIZE_32,
    };
 }
 
@@ -214,12 +224,48 @@ jay_is_flag(jay_def d)
 }
 
 /**
- * Return the number of SSA indices referenced by an jay_def.
+ * Return the number of SSA indices referenced by a jay_def.
  */
 static inline unsigned
 jay_num_values(jay_def d)
 {
    return jay_is_imm(d) || jay_is_null(d) ? 0 : (d.num_values_m1 + 1);
+}
+
+/**
+ * Convert a size enum to a size in ISA registers. This is just powers of two
+ * by construction.
+ */
+static inline unsigned
+jay_size_regs(enum jay_size size)
+{
+   return 1u << size;
+}
+
+/**
+ * Convert bit size <--> jay_size
+ */
+static inline enum jay_size
+jay_size_from_bits(unsigned bits)
+{
+   assert(bits == 16 || bits == 32);
+   return bits == 32 ? JAY_SIZE_32 : JAY_SIZE_16;
+}
+
+static inline unsigned
+jay_size_to_bits(enum jay_size size)
+{
+   return jay_size_regs(size) * 16;
+}
+
+/**
+ * Return the number of ISA registers referenced by a jay_def. ISA registers are
+ * 16-bit in the new data model.
+ */
+static inline unsigned
+jay_num_regs(jay_def d)
+{
+   return jay_size_regs(d.size) * jay_num_values(d);
 }
 
 /**
@@ -233,6 +279,9 @@ jay_is_ssa(jay_def d)
 
 #define jay_foreach_comp(def, c)                                               \
    for (unsigned c = 0; c < jay_num_values(def); ++c)
+
+#define jay_foreach_reg(def, c)                                                \
+   for (unsigned c = def.reg; c < def.reg + jay_num_regs(def); ++c)
 
 #define jay_foreach_comp_rev(def, c)                                           \
    for (signed c = jay_num_values(def) - 1; c >= 0; --c)
@@ -282,7 +331,10 @@ jay_channel(jay_def d, unsigned c)
  * Build a contiguous jay_def.
  */
 static inline jay_def
-jay_contiguous_def(enum jay_file file, uint32_t index, unsigned count)
+jay_contiguous_def(enum jay_file file,
+                   unsigned size,
+                   uint32_t index,
+                   unsigned count)
 {
    assert(count > 0 && count <= (1 << 7) && "max def width");
 
@@ -290,6 +342,7 @@ jay_contiguous_def(enum jay_file file, uint32_t index, unsigned count)
       ._payload = index,
       .file = file,
       .num_values_m1 = count - 1,
+      .size = jay_size_from_bits(size),
    };
 }
 
@@ -305,15 +358,15 @@ jay_replace_src(jay_def *old, jay_def replacement)
 }
 
 static inline jay_def
-jay_scalar(enum jay_file file, uint32_t index)
+jay_scalar(enum jay_file file, unsigned size, uint32_t index)
 {
-   return jay_contiguous_def(file, index, 1);
+   return jay_contiguous_def(file, size, index, 1);
 }
 
 static inline jay_def
 jay_null()
 {
-   return jay_scalar(J_ARF, 0);
+   return jay_scalar(J_ARF, 32, 0);
 }
 
 /**
@@ -327,7 +380,9 @@ jay_extract_range(jay_def def, unsigned chan, unsigned count)
    assert(chan + count <= jay_num_values(def));
 
    uint32_t base = jay_channel(def, chan);
-   jay_replace_src(&def, jay_contiguous_def(def.file, base, count));
+   jay_replace_src(&def,
+                   jay_contiguous_def(def.file, jay_size_to_bits(def.size),
+                                      base, count));
    return def;
 }
 
@@ -357,7 +412,8 @@ jay_defs_equivalent(jay_def a, jay_def b)
 {
    if (a.file != b.file ||
        a.num_values_m1 != b.num_values_m1 ||
-       a.collect != b.collect)
+       a.collect != b.collect ||
+       a.size != b.size)
       return false;
 
    if (likely(!a.collect)) {
@@ -378,6 +434,7 @@ jay_regs_equal(jay_def a, jay_def b)
 {
    return a.file == b.file &&
           a.num_values_m1 == b.num_values_m1 &&
+          a.size == b.size &&
           a.reg == b.reg;
 }
 
@@ -567,15 +624,19 @@ typedef struct jay_inst {
    bool saturate:1;
 
    /**
-    * In a SIMD split instruction, whether the regdist dependency is replicated
-    * to each physical instruction. If false, only the first instruction waits.
-    *
-    * If decrement_dep is also set, the regdist is decremented by the macro
-    * length for each instruction (modelling cross-pipe dependencies).
+    * Indicates the log2 number of SIMD splits. 0 for an instruction that's not
+    * split, 1 to split SIMD32 to SIMD16, 2 to split SIMD32 to SIMD8.
     */
-   bool replicate_dep:1;
-   bool decrement_dep:1;
-   uint8_t padding   :7;
+   unsigned simd_split:2;
+
+   /*
+    * Indicates the offset of the SIMD group executing this instruction in the
+    * SIMD width of the instruction. E.g. with simd_offs = 1, simd_split = 1 in
+    * a SIMD32 shader, this is equivalent to (16|M16).
+    */
+   unsigned simd_offs:3;
+
+   uint8_t padding:4;
 
    gen_condition conditional_mod;
 
@@ -594,7 +655,11 @@ static_assert(sizeof(jay_inst) == 24 + (sizeof(uintptr_t) * 2), "packed");
 static inline unsigned
 jay_num_isa_srcs(const jay_inst *I)
 {
-   return I->num_srcs - I->predication - (I->op == JAY_OPCODE_SEL);
+   return I->num_srcs -
+          I->predication -
+          (I->op == JAY_OPCODE_SEL ||
+           I->op == JAY_OPCODE_MACL ||
+           I->op == JAY_OPCODE_MACH);
 }
 
 static inline bool
@@ -681,8 +746,7 @@ jay_src_type(const jay_inst *I, unsigned s)
       return JAY_TYPE_U32;
 
    /* Indirect offset distinct from data type */
-   if ((I->op == JAY_OPCODE_SHUFFLE || I->op == JAY_OPCODE_VECTOR_EXTRACT) &&
-       s == 1)
+   if (I->op == JAY_OPCODE_SHUFFLE && s == 1)
       return JAY_TYPE_U32;
 
    /* TODO: *maybe* find a less janky way of handling mixed bfloat op type
@@ -761,6 +825,9 @@ struct jay_register_block {
 
    /** Special feature of the block */
    enum jay_block_type type:3;
+
+   /** Logarithmic split index. 0 full SIMD, 1 half-SIMD, 2 quarter */
+   unsigned split:3;
 };
 static_assert(sizeof(struct jay_register_block) == 8, "packed");
 
@@ -850,20 +917,28 @@ jay_new_shader(void *memctx, mesa_shader_stage stage)
 }
 
 static inline unsigned
+jay_grf_size_B(jay_shader *s)
+{
+   return reg_unit(s->devinfo) * 32;
+}
+
+static inline unsigned
 jay_ugpr_per_grf(jay_shader *s)
 {
-   unsigned B_per_unit = 32 /* see reg_unit */;
-   unsigned B_per_ugpr = 4;
+   return jay_grf_size_B(s) / 4;
+}
 
-   return reg_unit(s->devinfo) * (B_per_unit / B_per_ugpr);
+static inline unsigned
+jay_grf_per_gpr_at_width(jay_shader *s, unsigned width)
+{
+   assert(reg_unit(s->devinfo) == 1 || reg_unit(s->devinfo) == 2);
+   return reg_unit(s->devinfo) == 2 ? (width / 16) : (width / 8);
 }
 
 static inline unsigned
 jay_grf_per_gpr(jay_shader *s)
 {
-   assert(reg_unit(s->devinfo) == 1 || reg_unit(s->devinfo) == 2);
-   return reg_unit(s->devinfo) == 2 ? (s->dispatch_width / 16) :
-                                      (s->dispatch_width / 8);
+   return jay_grf_per_gpr_at_width(s, s->dispatch_width);
 }
 
 static inline unsigned
@@ -897,7 +972,9 @@ jay_inst_is_unordered(const struct intel_device_info *devinfo,
 {
    return I->op == JAY_OPCODE_SEND ||
           I->op == JAY_OPCODE_DPAS ||
-          (devinfo->ver < 20 && I->op == JAY_OPCODE_MATH);
+          (devinfo->ver < 20 && I->op == JAY_OPCODE_MATH) ||
+          (devinfo->ver < 20 &&
+           (I->type == JAY_TYPE_F64 || jay_src_type(I, 0) == JAY_TYPE_F64));
 }
 
 /*
@@ -907,16 +984,15 @@ static inline bool
 jay_is_shuffle_like(const jay_inst *I)
 {
    return I->op == JAY_OPCODE_SHUFFLE ||
-          I->op == JAY_OPCODE_VECTOR_EXTRACT ||
           I->op == JAY_OPCODE_QUAD_SWIZZLE ||
-          I->op == JAY_OPCODE_BROADCAST_IMM;
+          I->op == JAY_OPCODE_BROADCAST_IMM ||
+          I->op == JAY_OPCODE_MOV_INDIRECT;
 }
 
 static inline bool
 jay_clobbers_address_reg(const jay_inst *I)
 {
-   return (I->op == JAY_OPCODE_SHUFFLE || I->op == JAY_OPCODE_VECTOR_EXTRACT) &&
-          I->src[1].file == GPR;
+   return I->op == JAY_OPCODE_SHUFFLE && I->src[1].file == GPR;
 }
 
 /*
@@ -1030,7 +1106,9 @@ jay_simd_width_logical(const jay_shader *s, const jay_inst *I)
 
    /* Handle vectors-of-UGPR operations with special care for bitsizes */
    unsigned vec_per_channel = jay_type_vector_length(I->type);
-   unsigned dst_size = jay_num_values(I->dst);
+   unsigned dst_size = I->op == JAY_OPCODE_MUL_32_PART ?
+                          jay_num_values(I->src[0]) :
+                          jay_num_values(I->dst);
    assert(util_is_aligned(dst_size, vec_per_channel));
 
    if (base == 1 && dst_size > vec_per_channel && I->op != JAY_OPCODE_SEND) {
@@ -1052,29 +1130,18 @@ jay_simd_width_logical(const jay_shader *s, const jay_inst *I)
 static inline unsigned
 jay_simd_width_physical(jay_shader *s, const jay_inst *I)
 {
-   return jay_simd_width_logical(s, I) >> jay_simd_split(s, I);
+   return jay_simd_width_logical(s, I) >> I->simd_split;
 }
 
 /*
- * Returns the number of physical instructions emitted for each logical
- * instruction not accounting for SIMD split. That is, the number of
- * instructions that macros will expand to in jay_to_binary or 1 for non-macros.
+ * Returns whether a given Jay instruction will map to a compressed GEN
+ * instruction <==> an execution width exceeding the native SIMD width for
+ * the platform. These require special handling.
  */
-static inline unsigned
-jay_macro_length(const jay_inst *I)
+static inline bool
+jay_is_compressed(jay_shader *shader, jay_inst *I)
 {
-   switch (I->op) {
-   case JAY_OPCODE_MUL_32:
-   case JAY_OPCODE_SHUFFLE:
-   case JAY_OPCODE_VECTOR_EXTRACT:
-      return 2;
-
-   case JAY_OPCODE_SLICE_REPACK:
-      return 1 << jay_slice_repack_factor_log2(I);
-
-   default:
-      return 1;
-   }
+   return jay_simd_width_logical(shader, I) > 8 * reg_unit(shader->devinfo);
 }
 
 /**
@@ -1138,8 +1205,7 @@ jay_num_flags(jay_shader *shader)
 static inline unsigned
 jay_num_accums(jay_shader *shader)
 {
-   /* TODO: Adjust for older platforms */
-   unsigned total_grf = 4;
+   unsigned total_grf = shader->devinfo->verx10 < 125 ? 2 : 4;
    return total_grf / jay_grf_per_gpr(shader);
 }
 
@@ -1200,8 +1266,8 @@ typedef struct jay_block {
    struct u_sparse_bitset live_in;
    struct u_sparse_bitset live_out;
 
-   BITSET_DECLARE(postra_gpr_live_in, JAY_MAX_PHYS_GRF);
-   BITSET_DECLARE(postra_gpr_live_out, JAY_MAX_PHYS_GRF);
+   BITSET_DECLARE(postra_gpr_live_in, JAY_NR_POSTRA_LIVE);
+   BITSET_DECLARE(postra_gpr_live_out, JAY_NR_POSTRA_LIVE);
 
    /* Last-use bit for each non-null index in each source in each instruction in
     * the block, source order, left-to-right.
@@ -1231,6 +1297,12 @@ typedef struct jay_block {
    /** True if all non-exited lanes execute this block together */
    bool uniform;
 
+   /**
+    * Normalized factor for how many times this block is estimated to execute,
+    * used to weight static cycle count estimates.
+    */
+   float weight;
+
    /* Register demand metadata calculated for scheduling use */
    unsigned demand_max[JAY_NUM_SSA_FILES];
    unsigned demand_out[JAY_NUM_SSA_FILES];
@@ -1246,7 +1318,7 @@ _jay_block_destructor(void *_block)
 }
 
 static inline jay_block *
-jay_new_block(jay_function *f)
+jay_new_block(jay_function *f, float weight)
 {
    jay_block *block = rzalloc(f, jay_block);
    ralloc_set_destructor(block, &_jay_block_destructor);
@@ -1260,6 +1332,7 @@ jay_new_block(jay_function *f)
    list_inithead(&block->instructions);
 
    block->index = f->num_blocks++;
+   block->weight = weight;
    return block;
 }
 
@@ -1581,28 +1654,86 @@ jay_source_last_use_bit(const jay_def *srcs, unsigned src_idx)
    }
 
 /* Used for post-RA tracking ranges of all register files */
-struct jay_range {
-   unsigned base, width;
+struct jay_footprint {
+   unsigned base, width, stride, count;
 };
 
-static inline unsigned
-jay_range_base(jay_shader *shader, enum jay_file file)
+#define jay_foreach_in_footprint(fp, key)                                      \
+   for (unsigned _group = 0; _group < fp.count; ++_group)                      \
+      for (unsigned key = fp.base + (_group * fp.stride);                      \
+           key < fp.base + (_group * fp.stride) + fp.width; ++key)
+
+/* TODO: Optimize these */
+static inline void
+jay_footprint_set(BITSET_WORD *bitset, struct jay_footprint fp)
 {
-   return (file > GPR ? shader->num_regs[GPR] : 0) +
-          (file > UGPR ? shader->num_regs[UGPR] : 0) +
-          (file > FLAG ? shader->num_regs[FLAG] : 0) +
-          (file > ACCUM ? 4 : 0);
+   jay_foreach_in_footprint(fp, key) {
+      BITSET_SET(bitset, key);
+   }
 }
 
-static inline struct jay_range
-jay_def_to_range(jay_function *func, jay_inst *I, jay_def x)
+static inline bool
+jay_footprint_test(BITSET_WORD *bitset, struct jay_footprint fp)
 {
-   struct jay_range r = { 0, 0 };
+   bool x = false;
+
+   jay_foreach_in_footprint(fp, key) {
+      x |= BITSET_TEST(bitset, key);
+   }
+
+   return x;
+}
+
+static inline unsigned
+jay_footprint_base(jay_shader *shader, enum jay_file file)
+{
+   return (file > GPR ? (shader->num_regs[GPR] * jay_grf_per_gpr(shader)) : 0) +
+          (file > UGPR ? shader->num_regs[UGPR] : 0) +
+          (file > FLAG ? shader->num_regs[FLAG] : 0) +
+          (file > ACCUM ? 2 * JAY_MAX_ACCUMS : 0);
+}
+
+static inline struct jay_footprint
+jay_def_to_footprint(jay_function *func,
+                     jay_inst *I,
+                     jay_def x,
+                     enum jay_type type)
+{
+   struct jay_footprint r = { 0 };
 
    if (x.file == GPR || x.file == UGPR || x.file == ACCUM || x.file == FLAG) {
-      r.base = jay_range_base(func->shader, x.file);
-      r.base += (x.file == ACCUM) ? (x.reg / 2) : x.reg;
-      r.width = jay_num_values(x);
+      r.base = jay_footprint_base(func->shader, x.file) + x.reg;
+      r.count = 1;
+      r.width = jay_num_regs(x);
+
+      if (x.file == FLAG) {
+         assert(jay_num_values(x) == 1 && "no flag vectors");
+         r.width = jay_phys_flag_per_virt(func->shader);
+      }
+
+      if (x.file == ACCUM && !jay_type_is_any_float(type)) {
+         assert(x.reg == 0 && r.width == 2 && "only acc0 used with integers");
+         r.width = (func->shader->dispatch_width < 32) ? 4 : 2;
+      }
+
+      if (x.file == GPR) {
+         unsigned split = I->simd_split, offs = I->simd_offs;
+
+         /* Cross-lane access needs to wait on the whole subgroup */
+         if (jay_is_shuffle_like(I)) {
+            split = 0;
+            offs = 0;
+         }
+
+         /* Model the GPR block logically from the perspective of a single lane,
+          * with the entire block duplicated for each modelled SIMD. This could
+          * be optimized later but it's simple and obviously correct.
+          */
+         r.stride = func->shader->num_regs[GPR];
+         r.count = MAX2(jay_grf_per_gpr(func->shader) >> split, 1);
+         r.base += (r.stride * r.count * offs);
+         r.width = jay_num_regs(x);
+      }
    }
 
    return r;

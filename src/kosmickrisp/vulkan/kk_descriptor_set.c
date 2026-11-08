@@ -68,7 +68,7 @@ get_sampled_image_view_desc(VkDescriptorType descriptor_type,
       plane_count = view->plane_count;
       for (uint8_t plane = 0; plane < plane_count; plane++) {
          if (is_input_attachment) {
-            assert(view->planes[plane].sampled_gpu_resource_id);
+            assert(view->planes[plane].input_gpu_resource_id);
             desc[plane].image_gpu_resource_id =
                view->planes[plane].input_gpu_resource_id;
          } else {

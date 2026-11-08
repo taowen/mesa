@@ -2389,6 +2389,15 @@ d3d12_video_encoder_update_current_encoder_config_state(struct d3d12_video_encod
 #if VIDEO_CODEC_AV1ENC
       case PIPE_VIDEO_FORMAT_AV1:
       {
+         d3d12_video_encoder_update_output_stats_resources(pD3D12Enc,
+                                                           ((struct pipe_av1_enc_picture_desc *)picture)->gpu_stats_qp_map,
+                                                           ((struct pipe_av1_enc_picture_desc *)picture)->gpu_stats_satd_map,
+                                                           ((struct pipe_av1_enc_picture_desc *)picture)->gpu_stats_rc_bitallocation_map,
+                                                           ((struct pipe_av1_enc_picture_desc *)picture)->gpu_stats_psnr);
+
+         d3d12_video_encoder_update_move_rects(pD3D12Enc, ((struct pipe_av1_enc_picture_desc *)picture)->move_info);
+         d3d12_video_encoder_update_dirty_rects(pD3D12Enc, ((struct pipe_av1_enc_picture_desc *)picture)->dirty_info);
+
          d3d12_video_encoder_update_qpmap_input(pD3D12Enc, ((struct pipe_av1_enc_picture_desc *) picture)->input_qpmap_info,
                                                            ((struct pipe_av1_enc_picture_desc *)picture)->roi,
                                                            ((struct pipe_av1_enc_picture_desc *)picture)->temporal_id);

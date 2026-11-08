@@ -86,11 +86,25 @@ anv_get_buffer_memory_requirements(struct anv_device *device,
       (device->info->verx10 <= 120 &&
        (usage & VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT));
 
+   /* Bspec 56933 and HSD 14028776404 recommend disabling compression on ray
+    * tracing buffers for better performance. Disable compression if a buffer
+    * will only be used for that purpose.
+    */
+   bool prefer_uncompressed_buffer = (usage & ~(
+      VK_BUFFER_USAGE_2_SHADER_BINDING_TABLE_BIT_KHR |
+      VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+      VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+      VK_BUFFER_USAGE_2_MICROMAP_STORAGE_BIT_EXT |
+      VK_BUFFER_USAGE_2_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT
+      )) == 0;
+
    uint32_t memory_types;
    if (flags & VK_BUFFER_CREATE_PROTECTED_BIT)
       memory_types = device->physical->memory.protected_mem_types;
    else if (need_dynamic_visible_buffer)
       memory_types = device->physical->memory.dynamic_visible_mem_types;
+   else if (prefer_uncompressed_buffer)
+      memory_types = device->physical->memory.default_buffer_mem_types;
    else
       memory_types = device->physical->memory.default_buffer_mem_types |
                      device->physical->memory.compressed_mem_types;
@@ -311,7 +325,10 @@ uint64_t anv_GetBufferOpaqueCaptureAddress(
 {
    ANV_FROM_HANDLE(anv_buffer, buffer, pInfo->buffer);
 
-   return anv_address_physical(buffer->address);
+   if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)
+      return anv_address_physical(buffer->address);
+   else
+      return 0;
 }
 
 VkResult anv_GetBufferOpaqueCaptureDescriptorDataEXT(
@@ -321,7 +338,11 @@ VkResult anv_GetBufferOpaqueCaptureDescriptorDataEXT(
 {
    ANV_FROM_HANDLE(anv_buffer, buffer, pInfo->buffer);
 
-   *((uint64_t *)pData) = anv_address_physical(buffer->address);
+   uint64_t address = anv_address_physical(buffer->address);
+   if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)
+      memcpy(pData, &address, sizeof(address));
+   else
+      memset(pData, 0, sizeof(address));
 
    return VK_SUCCESS;
 }

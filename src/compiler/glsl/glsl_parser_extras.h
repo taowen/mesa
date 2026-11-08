@@ -523,7 +523,6 @@ struct _mesa_glsl_parse_state {
     */
    struct {
       /* 1.10 */
-      unsigned MaxLights;
       unsigned MaxClipPlanes;
       unsigned MaxTextureUnits;
       unsigned MaxTextureCoords;
@@ -604,8 +603,6 @@ struct _mesa_glsl_parse_state {
       unsigned MaxViewports;
 
       /* ARB_tessellation_shader */
-      unsigned MaxPatchVertices;
-      unsigned MaxTessGenLevel;
       unsigned MaxTessControlInputComponents;
       unsigned MaxTessControlOutputComponents;
       unsigned MaxTessControlTextureImageUnits;
@@ -613,7 +610,6 @@ struct _mesa_glsl_parse_state {
       unsigned MaxTessEvaluationOutputComponents;
       unsigned MaxTessEvaluationTextureImageUnits;
       unsigned MaxTessPatchComponents;
-      unsigned MaxTessControlTotalOutputComponents;
       unsigned MaxTessControlUniformComponents;
       unsigned MaxTessEvaluationUniformComponents;
 

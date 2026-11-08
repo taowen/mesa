@@ -531,6 +531,15 @@ typedef struct shader_info {
          bool sample_mask_in_declared:1;
 
          /**
+          * Records whether the shader originally had sample_mask_out in
+          * its output interface.
+          * When sample_mask_out_declared is set, the property
+          * fragmentShadingRateWithShaderSampleMask == VK_FALSE
+          * forces FSR to be disabled.
+          */
+         bool sample_mask_out_declared:1;
+
+         /**
           * whether this shader has pixel_local_storage load/store instructions
           */
          bool accesses_pixel_local_storage:1;
@@ -572,6 +581,13 @@ typedef struct shader_info {
 
       struct {
          uint16_t workgroup_size_hint[3];
+
+         /* If non-zero, this specifies the fixed number of invocations per
+          * workgroup when the workgroup size is variable but the number of
+          * invocations per workgroup doesn't change, i.e. only the shape
+          * of the workgroup changes.
+          */
+         uint16_t num_invocations_per_variable_workgroup;
 
          uint8_t user_data_components_amd:4;
 

@@ -2390,7 +2390,7 @@ remove_dead_varyings(struct linkage_info *linkage,
                            assert(elem == 0);
 
                            b->cursor = nir_before_instr(&load->instr);
-                           *offset_src = nir_src_for_ssa(nir_imm_int(b, 0));
+                           nir_src_rewrite(offset_src, nir_imm_int(b, 0));
 
                            /* Reduce the number of slots to 1. */
                            nir_io_semantics sem =
@@ -2491,7 +2491,7 @@ remove_dead_varyings(struct linkage_info *linkage,
                         nir_if *if_eq =
                            nir_push_if(b, nir_ieq_imm(b, offset.def,
                                                       direct_index));
-                        *offset_src = nir_src_for_ssa(nir_imm_int(b, 0));
+                        nir_src_rewrite(offset_src, nir_imm_int(b, 0));
                         nir_instr_move(b->cursor, &store->instr);
                         b->cursor = nir_after_instr(&store->instr);
                         nir_pop_if(b, if_eq);
@@ -3205,7 +3205,10 @@ print_dedup_entry(const char *place, struct set *set, dedup_entry *entry)
  * over the full struct are correct and efficient.
  * If this assert fires, audit all nir_scalar assignments below.
  */
-static_assert(sizeof(dedup_entry) == (sizeof(void *) == 8 ? 48 : 28),
+static_assert(sizeof(dedup_entry) ==
+              ALIGN_POT(sizeof(nir_block *) + 2 * sizeof(nir_scalar) +
+                        sizeof(unsigned) + sizeof(bool),
+                        alignof(dedup_entry)),
               "dedup_entry layout changed");
 
 static uint32_t
@@ -5862,6 +5865,7 @@ default_varying_estimate_instr_cost(nir_instr *instr)
       case nir_op_fcos:
       case nir_op_fsin_normalized_2_pi:
       case nir_op_fcos_normalized_2_pi:
+      case nir_op_ftanh:
          /* FP64 is usually much slower. */
          return dst_bit_size == 64 ? 32 : 4;
 

@@ -294,6 +294,14 @@ struct tu_vs_params {
    uint32_t vertex_offset;
    uint32_t first_instance;
    uint32_t draw_id;
+   uint32_t view_index;
+   uint32_t draw_id_offset;
+   /* Whether the last emitted params were for a SW multiview replay. Both the
+    * size of the uploaded const and whether VFD registers are part of the draw
+    * state depend on it, so it has to invalidate the cache below.
+    */
+   bool sw_multiview;
+   bool indirect;
    bool empty;
 };
 
@@ -318,6 +326,17 @@ struct tu_render_pass_state
    bool disable_gmem;
    bool sysmem_single_prim_mode;
    bool lrz_disable_for_next_rp;
+   /* Sticky for the RP duration */
+   bool lrz_write_disabled;
+
+   /* We need to track a specific stencil state to determine if we can keep LRZ writes
+    * in stencil-writes-based-on-depth-test case.
+    */
+   struct {
+      uint8_t write_mask;
+      bool has_depth_dependent_stencil_write;
+      bool incompatible;
+   } lrz_stencil_tag;
 
    /* This is set if, at any point in the render pass, we were not able to
     * duplicate the viewport per-view due to the user using multiple viewports
@@ -589,6 +608,7 @@ struct tu_cmd_state
       VkClearValue *clear_values;
 
       struct tu_lrz_state lrz;
+      bool lrz_write_disabled;
    } suspended_pass;
 
    bool fdm_enabled;
@@ -643,6 +663,13 @@ struct tu_cmd_state
 
    struct tu_vs_params last_vs_params;
    bool last_draw_indexed;
+
+   /* Set by tu_sw_multiview_draw() while it replays a draw for a single view
+    * on devices without HW multiview. Outside of it SW multiview is never
+    * active, so ordinary draws are unaffected.
+    */
+   bool sw_multiview;
+   uint32_t sw_view_index;
 
    struct tu_tess_params tess_params;
 
@@ -776,6 +803,17 @@ struct tu_cmd_buffer
 
    bool prev_fsr_is_null;
 };
+
+struct vk_device_dispatch_table;
+
+/* Replaces the draw entrypoints with wrappers emulating multiview by replaying
+ * each draw once per view. Only for devices without HW multiview.
+ */
+void
+tu_install_sw_multiview_draw_entrypoints(
+   struct vk_device_dispatch_table *dispatch_table,
+   const struct fd_dev_info *info);
+
 VK_DEFINE_HANDLE_CASTS(tu_cmd_buffer, vk.base, VkCommandBuffer,
                        VK_OBJECT_TYPE_COMMAND_BUFFER)
 
@@ -802,9 +840,6 @@ tu_attachment_gmem_offset_stencil(struct tu_cmd_buffer *cmd,
       layer * cmd->state.tiling->tile0.width * cmd->state.tiling->tile0.height *
       att->samples;
 }
-
-void tu_render_pass_state_merge(struct tu_render_pass_state *dst,
-                                const struct tu_render_pass_state *src);
 
 VkResult tu_cmd_buffer_begin(struct tu_cmd_buffer *cmd_buffer,
                              const VkCommandBufferBeginInfo *pBeginInfo);

@@ -247,7 +247,7 @@ static bool si_fence_finish(struct pipe_screen *screen, struct pipe_context *ctx
    struct si_context *sctx;
    int64_t abs_timeout = os_time_get_absolute_timeout(timeout);
 
-   ctx = threaded_context_unwrap_sync(ctx);
+   ctx = pipe_get_driver_context(threaded_context_unwrap_sync(ctx));
    sctx = (struct si_context *)(ctx ? ctx : NULL);
 
    if (!util_queue_fence_is_signalled(&sfence->ready)) {
@@ -456,8 +456,8 @@ static void si_flush_all_queues(struct pipe_context *ctx,
 
       tc_driver_internal_flush_notify(sctx->tc);
 
-      if (unlikely(sctx->sqtt && (flags & PIPE_FLUSH_END_OF_FRAME))) {
-         si_handle_sqtt(sctx, &sctx->gfx_cs);
+      if (unlikely(sctx->sqtt.data)) {
+         si_handle_sqtt(sctx, &sctx->gfx_cs, flags & PIPE_FLUSH_END_OF_FRAME);
       }
 
       if (unlikely(sctx->perfetto_enabled))

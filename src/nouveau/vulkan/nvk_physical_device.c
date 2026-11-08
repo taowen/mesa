@@ -18,7 +18,6 @@
 #include "nvkmd/nvkmd.h"
 #include "nvkmd/nouveau/nvkmd_nouveau.h"
 #include "git_sha1.h"
-#include "util/detect_os.h"
 #include "util/disk_cache.h"
 #include "util/hex.h"
 #include "util/mesa-blake3.h"
@@ -158,6 +157,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .KHR_incremental_present = true,
 #endif
       .KHR_index_type_uint8 = true,
+      .KHR_internally_synchronized_queues = true,
       .KHR_line_rasterization = true,
       .KHR_load_store_op_none = true,
       .KHR_maintenance1 = true,
@@ -170,6 +170,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .KHR_maintenance8 = true,
       .KHR_maintenance9 = true,
       .KHR_maintenance10 = true,
+      .KHR_maintenance11 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_pipeline_binary = true,
@@ -286,6 +287,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
 #ifdef NVK_USE_WSI_PLATFORM
       .EXT_present_timing = true,
 #endif
+      .EXT_primitive_restart_index = true,
       .EXT_primitive_topology_list_restart = true,
       .EXT_private_data = true,
       .EXT_primitives_generated_query = true,
@@ -319,7 +321,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .EXT_ycbcr_image_arrays = true,
       .EXT_zero_initialize_device_memory = true,
       .AMD_buffer_marker = true,
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       .ANDROID_native_buffer = vk_android_get_ugralloc() != NULL,
 #endif
       .GOOGLE_decorate_string = true,
@@ -526,6 +528,9 @@ nvk_get_device_features(const struct nv_device_info *info,
       .primitiveFragmentShadingRate = info->cls_eng3d >= TURING_A,
       .attachmentFragmentShadingRate = info->cls_eng3d >= TURING_A,
 
+      /* VK_KHR_internally_synchronized_queues */
+      .internallySynchronizedQueues = true,
+
       /* VK_KHR_maintenance7 */
       .maintenance7 = true,
 
@@ -537,6 +542,9 @@ nvk_get_device_features(const struct nv_device_info *info,
 
       /* VK_KHR_maintenance10 */
       .maintenance10 = true,
+
+      /* VK_KHR_maintenance11 */
+      .maintenance11 = true,
 
       /* VK_KHR_pipeline_binary */
       .pipelineBinaries = true,
@@ -742,6 +750,9 @@ nvk_get_device_features(const struct nv_device_info *info,
 
       /* VK_EXT_non_seamless_cube_map */
       .nonSeamlessCubeMap = true,
+
+      /* VK_EXT_primitive_restart_index */
+      .primitiveRestartIndex = true,
 
       /* VK_EXT_primitive_topology_list_restart */
       .primitiveTopologyListRestart = true,
@@ -1899,6 +1910,13 @@ nvk_GetPhysicalDeviceQueueFamilyProperties2(
                    VIDEO_CODEC_H264DEC)
                   p->videoCodecOperations =
                      VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
+               break;
+            }
+
+            case VK_STRUCTURE_TYPE_QUEUE_FAMILY_OPTIMAL_IMAGE_TRANSFER_GRANULARITY_PROPERTIES_KHR: {
+               VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR *prop =
+                  (VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR *)ext;
+               prop->optimalImageTransferGranularity = (VkExtent3D){ 1, 1, 1, };
                break;
             }
 

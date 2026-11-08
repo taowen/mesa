@@ -47,7 +47,7 @@ static const struct debug_control panvk_debug_options[] = {
    {"force_simultaneous", PANVK_DEBUG_FORCE_SIMULTANEOUS},
    {"implicit_others_inv", PANVK_DEBUG_IMPLICIT_OTHERS_INV},
    {"force_blackhole", PANVK_DEBUG_FORCE_BLACKHOLE},
-   {"wsi_afbc", PANVK_DEBUG_WSI_AFBC},
+   {"wsi_no_afbc", PANVK_DEBUG_WSI_NO_AFBC},
    {"no_wb_mmap", PANVK_DEBUG_NO_WB_MMAP},
    {"no_user_mmap_sync", PANVK_DEBUG_NO_USER_MMAP_SYNC},
    {"cached_before_coherent", PANVK_DEBUG_CACHED_BEFORE_COHERENT},
@@ -105,6 +105,7 @@ static const struct vk_instance_extension_table panvk_instance_extensions = {
    .KHR_surface = true,
    .KHR_surface_maintenance1 = true,
    .EXT_surface_maintenance1 = true,
+   .EXT_swapchain_colorspace = true,
 #endif
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
    .KHR_display = true,
@@ -138,10 +139,6 @@ panvk_physical_device_try_create(struct vk_instance *vk_instance,
 {
    struct panvk_instance *instance =
       container_of(vk_instance, struct panvk_instance, vk);
-
-   if (!(drm_device->available_nodes & (1 << DRM_NODE_RENDER)) ||
-       drm_device->bustype != DRM_BUS_PLATFORM)
-      return VK_ERROR_INCOMPATIBLE_DRIVER;
 
    struct panvk_physical_device *device =
       vk_zalloc(&instance->vk.alloc, sizeof(*device), 8,
@@ -315,8 +312,8 @@ PFN_vkVoidFunction
 panvk_GetInstanceProcAddr(VkInstance _instance, const char *pName)
 {
    VK_FROM_HANDLE(panvk_instance, instance, _instance);
-   return vk_instance_get_proc_addr(&instance->vk, &panvk_instance_entrypoints,
-                                    pName);
+   return vk_instance_get_proc_addr(instance ? &instance->vk : NULL,
+                                    &panvk_instance_entrypoints, pName);
 }
 
 /* The loader wants us to expose a second GetInstanceProcAddr function

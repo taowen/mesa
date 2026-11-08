@@ -106,6 +106,13 @@ enum ethosu_upscale_mode {
    ETHOSU_UPSCALE_ZEROS = 2,
 };
 
+enum ethosu_transpose_type {
+   ETHOSU_TRANSPOSE_NONE = 0,
+   ETHOSU_TRANSPOSE_HEIGHT_WIDTH,
+   ETHOSU_TRANSPOSE_WIDTH_DEPTH,
+   ETHOSU_TRANSPOSE_HEIGHT_DEPTH,
+};
+
 struct ethosu_stride {
    unsigned x;
    unsigned y;
@@ -217,8 +224,12 @@ struct ethosu_operation {
       struct {
          struct ethosu_address_range weights;
          struct ethosu_address_range scales;
+         uint8_t *weight_data;
+         unsigned weight_data_size;
+         int32_t *bias_data;
          bool depthwise;
          bool weight_sparse;
+         bool weights_in_sram;
          unsigned scale;
          unsigned shift;
          int activation_min;
@@ -228,6 +239,7 @@ struct ethosu_operation {
       struct {
          enum ethosu_pooling_type type;
          bool nop;
+         enum ethosu_transpose_type transpose;
       } pooling;
 
       struct {
@@ -252,6 +264,7 @@ struct ethosu_operation {
    struct ethosu_feature_map ifm2;
    struct ethosu_feature_map ofm;
    struct ethosu_address_range lut;
+   bool reuses_coefs;
 
    struct ethosu_kernel kernel;
    struct ethosu_padding pad;
@@ -268,7 +281,6 @@ struct ethosu_tensor {
    unsigned index;
    unsigned offset;
    unsigned size;
-   unsigned required_size;
    unsigned batches;
    uint8_t type_size;
    struct ethosu_block shape;

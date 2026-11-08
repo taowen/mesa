@@ -201,6 +201,9 @@ typedef enum ir3_register_flags {
    IR3_REG_UNIFORM = BIT(24),
 } ir3_register_flags;
 
+#define IR3_REG_SRC_MODS (IR3_REG_FNEG | IR3_REG_FABS | IR3_REG_SNEG | \
+                          IR3_REG_SABS | IR3_REG_BNOT)
+
 struct ir3_register {
    BITMASK_ENUM(ir3_register_flags) flags;
 
@@ -992,6 +995,10 @@ __ssa_srcp_n(struct ir3_instruction *instr, unsigned n)
    list_for_each_entry_safe (struct ir3_block, __block, __list, node)
 #define foreach_block_rev(__block, __list)                                     \
    list_for_each_entry_rev (struct ir3_block, __block, __list, node)
+#define foreach_block_from(__block, __list, __start)                           \
+   list_for_each_entry_from (struct ir3_block, __block, __start, __list, node)
+#define foreach_main_block(__block, __ir)                                      \
+   foreach_block_from (__block, &__ir->block_list, ir3_after_preamble(__ir))
 
 /* iterators for arrays: */
 #define foreach_array(__array, __list)                                         \
@@ -1101,6 +1108,8 @@ void ir3_instr_add_dep(struct ir3_instruction *instr,
                        struct ir3_instruction *dep);
 const char *ir3_instr_name(struct ir3_instruction *instr);
 void ir3_instr_remove(struct ir3_instruction *instr);
+struct ir3_instruction *ir3_instr_prev(struct ir3_instruction *instr);
+struct ir3_instruction *ir3_instr_next(struct ir3_instruction *instr);
 
 void ir3_instr_create_rpt(struct ir3_instruction **instrs, unsigned n);
 bool ir3_instr_is_rpt(const struct ir3_instruction *instr);
@@ -1279,11 +1288,11 @@ is_same_type_reg(struct ir3_register *dst, struct ir3_register *src)
 }
 
 /* Is it a non-transformative (ie. not type changing) mov?  This can
- * also include absneg.s/absneg.f, which for the most part can be
- * treated as a mov (single src argument).
+ * also include absneg.s/absneg.f/not.b, which for the most part can be
+ * treated as a mov (single src argument) with source modifiers.
  */
 static inline bool
-is_same_type_mov(struct ir3_instruction *instr)
+is_same_type_mov(struct ir3_instruction *instr, bool allow_src_mods)
 {
    struct ir3_register *dst;
 
@@ -1291,25 +1300,27 @@ is_same_type_mov(struct ir3_instruction *instr)
    case OPC_MOV:
       if (instr->cat1.src_type != instr->cat1.dst_type)
          return false;
-      /* If the type of dest reg and src reg are different,
-       * it shouldn't be considered as same type mov
-       */
-      if (!is_same_type_reg(instr->dsts[0], instr->srcs[0]))
-         return false;
       break;
    case OPC_ABSNEG_F:
    case OPC_ABSNEG_S:
+      if (!allow_src_mods)
+         return false;
       if (instr->flags & IR3_INSTR_SAT)
          return false;
-      /* If the type of dest reg and src reg are different,
-       * it shouldn't be considered as same type mov
-       */
-      if (!is_same_type_reg(instr->dsts[0], instr->srcs[0]))
+      break;
+   case OPC_NOT_B:
+      if (!allow_src_mods)
          return false;
       break;
    default:
       return false;
    }
+
+   /* If the type of dest reg and src reg are different,
+    * it shouldn't be considered as same type mov
+    */
+   if (!is_same_type_reg(instr->dsts[0], instr->srcs[0]))
+      return false;
 
    dst = instr->dsts[0];
 
@@ -1386,6 +1397,12 @@ static inline bool
 is_alu(struct ir3_instruction *instr)
 {
    return (1 <= opc_cat(instr->opc)) && (opc_cat(instr->opc) <= 3);
+}
+
+static inline bool
+is_mov(struct ir3_instruction *instr)
+{
+   return opc_cat(instr->opc) == 1;
 }
 
 static inline bool
@@ -1520,6 +1537,7 @@ is_bool(struct ir3_instruction *instr)
    case OPC_CMPS_F:
    case OPC_CMPS_S:
    case OPC_CMPS_U:
+   case OPC_GETBIT_B:
       return true;
    default:
       return false;
@@ -1886,7 +1904,8 @@ ir3_cat2_int(opc_t opc)
 }
 
 /* map cat2 instruction to valid abs/neg flags: */
-unsigned ir3_cat2_absneg(opc_t opc);
+unsigned ir3_cat2_absneg(struct ir3_compiler *compiler, opc_t opc,
+                         unsigned src_n);
 
 /* map cat3 instructions to valid abs/neg flags: */
 unsigned ir3_cat3_absneg(struct ir3_compiler *compiler, opc_t opc,
@@ -3157,11 +3176,14 @@ INSTR2NODST(STC)
 INSTR2NODST(STSC)
 INSTR2(SHFL)
 #ifndef GPU
+#elif GPU >= 500
+INSTR5(LDG_A);
+INSTR6NODST(STG_A);
+#endif
+#ifndef GPU
 #elif GPU >= 600
 INSTR4NODST(STIB);
 INSTR3(LDIB);
-INSTR5(LDG_A);
-INSTR6NODST(STG_A);
 INSTR2(ATOMIC_G_ADD)
 INSTR2(ATOMIC_G_SUB)
 INSTR2(ATOMIC_G_XCHG)

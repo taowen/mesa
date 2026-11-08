@@ -107,6 +107,15 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
       features |= VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT;
       features |= VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
       features |= VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
+
+      if (vk_format_has_depth(vk_format)) {
+         features |= VK_FORMAT_FEATURE_2_DEPTH_COPY_ON_COMPUTE_QUEUE_BIT_KHR |
+                     VK_FORMAT_FEATURE_2_DEPTH_COPY_ON_TRANSFER_QUEUE_BIT_KHR;
+      }
+      if (vk_format_has_stencil(vk_format)) {
+         features |= VK_FORMAT_FEATURE_2_STENCIL_COPY_ON_COMPUTE_QUEUE_BIT_KHR |
+                     VK_FORMAT_FEATURE_2_STENCIL_COPY_ON_TRANSFER_QUEUE_BIT_KHR;
+      }
    }
 
    return features;
@@ -177,9 +186,9 @@ hk_get_image_format_features(struct hk_physical_device *pdev,
 }
 
 static VkFormatFeatureFlags2
-vk_image_usage_to_format_features(VkImageUsageFlagBits usage_flag)
+vk_image_usage_to_format_features(VkImageUsageFlagBits2KHR usage_flag)
 {
-   assert(util_bitcount(usage_flag) == 1);
+   assert(util_bitcount64(usage_flag) == 1);
    switch (usage_flag) {
    case VK_IMAGE_USAGE_TRANSFER_SRC_BIT:
       return VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
@@ -307,6 +316,10 @@ hk_GetPhysicalDeviceImageFormatProperties2(
 {
    VK_FROM_HANDLE(hk_physical_device, pdev, physicalDevice);
 
+   const VkImageUsageFlags2KHR all_usage =
+      vk_image_format_info_2_usage(pImageFormatInfo) |
+      vk_image_format_info_2_stencil_usage(pImageFormatInfo);
+
    const VkPhysicalDeviceExternalImageFormatInfo *external_info =
       vk_find_struct_const(pImageFormatInfo->pNext,
                            PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO);
@@ -356,7 +369,7 @@ hk_GetPhysicalDeviceImageFormatProperties2(
    if (pImageFormatInfo->flags & (VK_IMAGE_CREATE_SPARSE_ALIASED_BIT |
                                   VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
                                   VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) &&
-       (pImageFormatInfo->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT))
+       (all_usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    if (features == 0)
@@ -468,8 +481,7 @@ hk_GetPhysicalDeviceImageFormatProperties2(
     * different usage than the image so we can't always filter on usage.
     * There is one exception to this below for storage.
     */
-   const VkImageUsageFlags image_usage = pImageFormatInfo->usage;
-   VkImageUsageFlags view_usage = image_usage;
+   VkImageUsageFlags2KHR view_usage = all_usage;
    if (pImageFormatInfo->flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)
       view_usage = 0;
 
@@ -480,9 +492,9 @@ hk_GetPhysicalDeviceImageFormatProperties2(
       }
    }
 
-   u_foreach_bit(b, view_usage) {
+   u_foreach_bit64(b, view_usage) {
       VkFormatFeatureFlags2 usage_features =
-         vk_image_usage_to_format_features(1 << b);
+         vk_image_usage_to_format_features(1ull << b);
       if (usage_features && !(features & usage_features))
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
    }
@@ -933,7 +945,7 @@ hk_image_plane_alloc_vma(struct hk_device *dev, struct hk_image_plane *plane,
        * In the future we could optimize this out using the PBE sparse support
        * but that needs more reverse-engineering.
        */
-      hk_bind_scratch(dev, plane->va, 0, size);
+      hk_bind_scratch(dev, plane->va, 0, size, true);
    }
 
    if (sparse_resident) {

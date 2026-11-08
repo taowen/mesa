@@ -19,6 +19,7 @@ libpanfrost_compiler_files = files(
   'pan_nir_lower_noperspective.c',
   'pan_nir_lower_sample_position.c',
   'pan_nir_lower_tex.c',
+  'pan_nir_lower_trig.c',
   'pan_nir_lower_var_special.c',
   'pan_nir_lower_vertex_id.c',
   'pan_nir_lower_vs_inputs.c',
@@ -31,6 +32,11 @@ libpanfrost_compiler_files = files(
 libpanfrost_compiler_c_args = [no_override_init_args, soong_compat_c_args]
 if with_panfrost_rust
   libpanfrost_compiler_c_args += ['-DWITH_PANFROST_RUST']
+endif
+
+with_panfrost_disassemble = get_option('panfrost-disassemble')
+if with_panfrost_disassemble
+  libpanfrost_compiler_c_args += ['-DWITH_PANFROST_DISASSEMBLE']
 endif
 
 if with_panfrost_rust

@@ -1682,10 +1682,10 @@ static void si_set_active_query_state(struct pipe_context *ctx, bool enable)
    if (enable) {
       /* Disable pipeline stats if there are no active queries. */
       if (sctx->num_hw_pipestat_streamout_queries)
-         si_clear_and_set_barrier_flags(sctx, SI_BARRIER_EVENT_PIPELINESTAT_STOP, SI_BARRIER_EVENT_PIPELINESTAT_START);
+         si_clear_and_set_barrier_flags(sctx, AC_BARRIER_PIPELINESTAT_STOP, AC_BARRIER_PIPELINESTAT_START);
    } else {
       if (sctx->num_hw_pipestat_streamout_queries)
-         si_clear_and_set_barrier_flags(sctx, SI_BARRIER_EVENT_PIPELINESTAT_START, SI_BARRIER_EVENT_PIPELINESTAT_STOP);
+         si_clear_and_set_barrier_flags(sctx, AC_BARRIER_PIPELINESTAT_START, AC_BARRIER_PIPELINESTAT_STOP);
    }
 
    /* Occlusion queries. */
@@ -1955,12 +1955,12 @@ static unsigned si_tex_mipfilter(unsigned filter)
 {
    switch (filter) {
    case PIPE_TEX_MIPFILTER_NEAREST:
-      return V_008F38_SQ_TEX_Z_FILTER_POINT;
+      return V_008F38_SQ_TEX_MIP_FILTER_POINT;
    case PIPE_TEX_MIPFILTER_LINEAR:
-      return V_008F38_SQ_TEX_Z_FILTER_LINEAR;
+      return V_008F38_SQ_TEX_MIP_FILTER_LINEAR;
    default:
    case PIPE_TEX_MIPFILTER_NONE:
-      return V_008F38_SQ_TEX_Z_FILTER_NONE;
+      return V_008F38_SQ_TEX_MIP_FILTER_NONE;
    }
 }
 
@@ -2535,9 +2535,15 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
 
    sctx->framebuffer.compressed_cb_mask = 0;
    sctx->framebuffer.uncompressed_cb_mask = 0;
+   unsigned old_log_samples = sctx->framebuffer.log_samples;
    sctx->framebuffer.nr_samples = util_framebuffer_get_num_samples(state);
    sctx->framebuffer.nr_color_samples = sctx->framebuffer.nr_samples;
    sctx->framebuffer.log_samples = util_logbase2(sctx->framebuffer.nr_samples);
+
+   /* Gfx11 writes the sample count to DB_Z_INFO.NUM_SAMPLES when no Z/S is bound. */
+   if (sctx->gfx_level >= GFX11 && sctx->gfx_level < GFX12 && !state->zsbuf.texture &&
+       sctx->framebuffer.log_samples != old_log_samples)
+      sctx->framebuffer.dirty_zsbuf = true;
    sctx->framebuffer.any_dst_linear = false;
    sctx->framebuffer.CB_has_shader_readable_metadata = false;
    sctx->framebuffer.DB_has_shader_readable_metadata = false;
@@ -2600,7 +2606,7 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
        * This gives the best results for slow clears for AMD_TEST=blitperf on Navi31.
        */
       if ((sctx->framebuffer.nr_samples == 8 && tex->surface.bpe != 2) ||
-          (tex->surface.thick_tiling && tex->surface.bpe == 4 &&
+          (tex->surface.block256B_extent.depth > 1 && tex->surface.bpe == 4 &&
            util_format_get_nr_components(psurf->format) == 4))
          sctx->framebuffer.disable_vrs_flat_shading = true;
    }
@@ -4717,7 +4723,9 @@ static void si_pm4_emit_sqtt_pipeline(struct si_context *sctx, unsigned index)
 {
    struct si_pm4_state *state = sctx->queued.array[index];
 
-   si_pm4_emit_state(sctx, index);
+   /* like the rasterizer, this is re-emitted while it's bound */
+   si_pm4_emit_commands(sctx, &state->base);
+   sctx->emitted.array[index] = state;
 
    radeon_add_to_buffer_list(sctx, &sctx->gfx_cs, ((struct si_sqtt_fake_pipeline*)state)->bo,
                              RADEON_USAGE_READ | RADEON_PRIO_SHADER_BINARY);

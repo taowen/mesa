@@ -55,7 +55,8 @@ struct InstrInfo {
 
 struct RegisterInfo {
    mask_t read_mask; /* bitmask of nodes which have to be scheduled before the next write. */
-   uint16_t latency : 11; /* estimated outstanding latency of last register write outside the DAG. */
+   uint16_t latency
+      : 11; /* estimated outstanding latency of last register write outside the DAG. */
    uint16_t direct_dependency : 4;     /* node that has to be scheduled before any other access. */
    uint16_t has_direct_dependency : 1; /* whether there is an unscheduled direct dependency. */
 };
@@ -229,8 +230,7 @@ get_vopd_info(const SchedILPContext& ctx, const Instruction* instr)
       bool bf16 = instr->opcode == aco_opcode::v_dot2_f32_bf16;
       /* src2 must be the same as the destination. */
       if (!instr->operands[2].isOfType(RegType::vgpr) ||
-          instr->operands[2].physReg() != instr->definitions[0].physReg() ||
-          instr->valu().clamp)
+          instr->operands[2].physReg() != instr->definitions[0].physReg() || instr->valu().clamp)
          return VOPDInfo();
 
       /* One pair of factors must be a vgpr. */
@@ -298,7 +298,13 @@ get_vopd_info(const SchedILPContext& ctx, const Instruction* instr)
 
    info.is_dst_odd = instr->definitions[0].physReg().reg() & 0x1;
 
-   static const unsigned bank_mask[3] = {0x3, 0x3, 0x1};
+   /* GFX11 has a hazard that makes a port using two odd/even operands unsafe:
+    * https://github.com/llvm/llvm-project/pull/220348
+    */
+   const bool has_interlock_hazard = ctx.program->gfx_level <= GFX11_5;
+   const unsigned bank_mask[3] = {has_interlock_hazard ? 0x1u : 0x3u,
+                                  has_interlock_hazard ? 0x1u : 0x3u, 0x1u};
+
    bool has_sgpr = false;
    for (unsigned i = 0; i < info.num_operands; i++) {
       uint8_t swizzle = (info.operand_swizzle >> (i * 2)) & 0x3;
@@ -692,7 +698,8 @@ remove_entry(SchedILPContext& ctx, const Instruction* const instr, const uint32_
          if (ctx.regs[reg].has_direct_dependency && ctx.regs[reg].direct_dependency == idx) {
             ctx.regs[reg].has_direct_dependency = false;
             if (!ctx.is_vopd) {
-               /* Do MAX2() so that the latency from both predecessors of a merge block are considered. */
+               /* Do MAX2() so that the latency from both predecessors of a merge block are
+                * considered. */
                if (BITSET_TEST(ctx.reg_has_latency, reg))
                   ctx.regs[reg].latency = MAX2(ctx.regs[reg].latency, latency);
                else

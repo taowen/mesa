@@ -45,11 +45,10 @@ radv_emit_wait_for_idle(const struct radv_device *device, struct radv_cmd_stream
    enum ac_rgp_flush_bits rgp_flush_bits = 0;
    radv_cs_emit_cache_flush(
       device->ws, cs, pdev->info.gfx_level, NULL, 0,
-      (cs->hw_ip == AMD_IP_COMPUTE
-          ? RADV_CMD_FLAG_CS_PARTIAL_FLUSH
-          : (RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_VS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH)) |
-         RADV_CMD_FLAG_INV_ICACHE | RADV_CMD_FLAG_INV_SCACHE | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_L2,
-      &rgp_flush_bits, RADV_PWS_ACQUIRE_POINT_PFP, 0);
+      (cs->hw_ip == AMD_IP_COMPUTE ? AC_BARRIER_SYNC_CS
+                                   : (AC_BARRIER_SYNC_CS | AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS)) |
+         AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_SMEM | AC_BARRIER_INV_VMEM | AC_BARRIER_INV_L2,
+      &rgp_flush_bits, AC_PWS_ACQUIRE_POINT_PFP, 0);
 }
 
 static void
@@ -380,21 +379,19 @@ radv_unregister_queue(struct radv_device *device, struct radv_queue *queue)
 static void
 radv_register_queues(struct radv_device *device, struct ac_sqtt *sqtt)
 {
-   if (device->queue_count[RADV_QUEUE_GENERAL] == 1)
-      radv_register_queue(device, &device->queues[RADV_QUEUE_GENERAL][0]);
+   for (uint32_t i = 0; i < device->queue_count; i++) {
+      struct radv_queue *queue = &device->queues[i];
 
-   for (uint32_t i = 0; i < device->queue_count[RADV_QUEUE_COMPUTE]; i++)
-      radv_register_queue(device, &device->queues[RADV_QUEUE_COMPUTE][i]);
+      if (queue->state.qf == RADV_QUEUE_GENERAL || queue->state.qf == RADV_QUEUE_COMPUTE)
+         radv_register_queue(device, queue);
+   }
 }
 
 static void
 radv_unregister_queues(struct radv_device *device, struct ac_sqtt *sqtt)
 {
-   if (device->queue_count[RADV_QUEUE_GENERAL] == 1)
-      radv_unregister_queue(device, &device->queues[RADV_QUEUE_GENERAL][0]);
-
-   for (uint32_t i = 0; i < device->queue_count[RADV_QUEUE_COMPUTE]; i++)
-      radv_unregister_queue(device, &device->queues[RADV_QUEUE_COMPUTE][i]);
+   for (uint32_t i = 0; i < device->queue_count; i++)
+      radv_unregister_queue(device, &device->queues[i]);
 }
 
 bool
@@ -560,7 +557,7 @@ radv_begin_sqtt(struct radv_queue *queue)
       ac_emit_spm_reset(cs->b);
 
       /* Enable all shader stages by default. */
-      radv_perfcounter_emit_shaders(device, cs, ac_sqtt_get_shader_mask(&pdev->info));
+      ac_pc_emit_shaders(pdev->info.gfx_level, cs->b, ac_sqtt_get_shader_mask(&pdev->info));
 
       radv_emit_spm_setup(device, cs);
    }
@@ -858,6 +855,13 @@ radv_sqtt_sample_clocks(struct radv_device *device)
 
    if (!ac_sqtt_add_clock_calibration(&device->sqtt, cpu_timestamp, gpu_timestamp))
       return false;
+
+   /* The SMU metrics can return a stale snapshot on the first read after a while, refresh them with
+    * a dummy read and wait for the kernel metrics cache to expire before sampling.
+    */
+   shader_clock_freq = ws->query_value(ws, RADEON_CURRENT_SCLK);
+   memory_clock_freq = ws->query_value(ws, RADEON_CURRENT_MCLK);
+   os_time_sleep(5000); /* 5ms */
 
    shader_clock_freq = ws->query_value(ws, RADEON_CURRENT_SCLK);
    memory_clock_freq = ws->query_value(ws, RADEON_CURRENT_MCLK);

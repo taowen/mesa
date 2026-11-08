@@ -653,7 +653,7 @@ resize_tes_inputs(const struct gl_constants *consts,
     */
    const int num_vertices = tcs
       ? tcs->Program->nir->info.tess.tcs_vertices_out
-      : consts->MaxPatchVertices;
+      : MAX_PATCH_VERTICES;
 
    resize_input_array(tes->Program->nir, prog, MESA_SHADER_TESS_EVAL,
                       num_vertices);

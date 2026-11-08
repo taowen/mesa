@@ -114,6 +114,7 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
    program->dev.sram_ecc_enabled = options->compiler_info->has_sram_ecc_enabled;
    program->dev.has_point_sample_accel = options->compiler_info->has_point_sample_accel;
    program->dev.has_gfx6_mrt_export_bug = options->compiler_info->has_gfx6_mrt_export_bug;
+   program->dev.has_unpacked_d16 = options->compiler_info->has_unpacked_d16;
 
    program->dev.has_fast_fma32 = options->compiler_info->has_fast_fma32;
    program->dev.has_mac_legacy32 = program->gfx_level <= GFX7 || program->gfx_level == GFX10;
@@ -434,6 +435,8 @@ opcode_supports_dpp(amd_gfx_level gfx_level, aco_opcode opcode, bool vop3p)
    case aco_opcode::v_lshlrev_b16_e64: return false;
    case aco_opcode::v_pk_fmac_f16: return gfx_level < GFX11;
    /* there are more cases but those all take 64-bit inputs */
+   case aco_opcode::p_v_mad_u32_u32_u16:
+   case aco_opcode::p_v_mad_u32:
    case aco_opcode::v_madmk_f32:
    case aco_opcode::v_madak_f32:
    case aco_opcode::v_madmk_f16:
@@ -652,13 +655,14 @@ can_use_opsel(amd_gfx_level gfx_level, aco_opcode op, int idx)
    case aco_opcode::v_cvt_pk_bf8_f32: return idx == -1;
    case aco_opcode::v_alignbyte_b32:
    case aco_opcode::v_alignbit_b32: return idx == 2;
+   case aco_opcode::p_v_mad_u32_u32_u16: return idx == 1;
    default:
       return gfx_level >= GFX11 && (get_gfx11_true16_mask(op) & BITFIELD_BIT(idx == -1 ? 3 : idx));
    }
 }
 
 bool
-can_write_m0(const aco_ptr<Instruction>& instr)
+can_write_m0(const Instruction* instr)
 {
    if (instr->isSALU())
       return true;
@@ -979,6 +983,8 @@ get_subdword_definition_caps(Program* program, const Instruction* instr, unsigne
       return caps;
    }
 
+   bool d16_full_vgpr_writes = program->dev.sram_ecc_enabled || gfx_level < GFX9;
+
    switch (instr->opcode) {
    case aco_opcode::v_interp_p2_f16: assert(rc.bytes() == 2); return caps;
    /* D16 loads with _hi version */
@@ -996,18 +1002,16 @@ get_subdword_definition_caps(Program* program, const Instruction* instr, unsigne
    case aco_opcode::scratch_load_short_d16:
    case aco_opcode::buffer_load_ubyte_d16:
    case aco_opcode::buffer_load_sbyte_d16:
-   case aco_opcode::buffer_load_short_d16:
+   case aco_opcode::buffer_load_short_d16: assert(gfx_level >= GFX9); FALLTHROUGH;
    case aco_opcode::buffer_load_format_d16_x: {
-      assert(gfx_level >= GFX9);
-      caps.overwrite_bytes = program->dev.sram_ecc_enabled ? 4 : 2;
-      caps.placement_stride = 2;
+      caps.overwrite_bytes = d16_full_vgpr_writes ? 4 : 2;
+      caps.placement_stride = gfx_level < GFX9 ? 4 : 2;
       return caps;
    }
    /* 3-component D16 loads */
    case aco_opcode::buffer_load_format_d16_xyz:
    case aco_opcode::tbuffer_load_format_d16_xyz: {
-      assert(gfx_level >= GFX9);
-      caps.overwrite_bytes = program->dev.sram_ecc_enabled ? 8 : 6;
+      caps.overwrite_bytes = d16_full_vgpr_writes ? 8 : 6;
       caps.placement_stride = 4;
       return caps;
    }
@@ -1015,8 +1019,8 @@ get_subdword_definition_caps(Program* program, const Instruction* instr, unsigne
    }
 
    caps.placement_stride = 4;
-   if (instr->isMIMG() && instr->mimg().d16 && !program->dev.sram_ecc_enabled)
-      assert(gfx_level >= GFX9);
+   if (instr->isMIMG() && instr->mimg().d16 && !d16_full_vgpr_writes)
+      assert(rc.bytes() % 2 == 0);
    else
       caps.overwrite_bytes = rc.size() * 4;
    return caps;
@@ -1246,13 +1250,6 @@ get_vcmpx(aco_opcode op)
 {
    CmpInfo info;
    return get_cmp_info(op, &info) ? info.vcmpx : aco_opcode::num_opcodes;
-}
-
-bool
-is_cmpx(aco_opcode op)
-{
-   CmpInfo info;
-   return !get_cmp_info(op, &info);
 }
 
 aco_opcode
@@ -1806,9 +1803,7 @@ parse_depctr_wait(const Instruction* instr)
          res.sa_sdst = 0;
          break;
       case aco_opcode::s_cbranch_scc0:
-      case aco_opcode::s_cbranch_scc1:
-         res.sa_sdst = 0;
-         break;
+      case aco_opcode::s_cbranch_scc1: res.sa_sdst = 0; break;
       default: break;
       }
    } else if (instr->isSALU()) {

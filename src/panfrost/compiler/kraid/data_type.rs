@@ -84,6 +84,7 @@ pub enum PartialDataType {
     V4U8,
     VNIN,
     VNI8,
+    VNF16,
     V3A16,
     V3F16,
     V3I16,
@@ -288,6 +289,11 @@ impl DataType {
 
     pub fn is_int_type(&self) -> bool {
         self.num_type() == NumericType::Integer
+    }
+
+    pub fn is_any_int_type(&self) -> bool {
+        use NumericType::*;
+        [Integer, UnsignedInteger, SignedInteger].contains(&self.num_type())
     }
 
     pub fn total_bits(&self) -> u8 {

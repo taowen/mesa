@@ -369,7 +369,8 @@ init_common_queue_state(struct anv_queue *queue, struct anv_batch *batch)
              */
             .offset = device->btd_fifo_bo->offset,
          };
-#if INTEL_NEEDS_WA_14017794102 || INTEL_NEEDS_WA_14023061436
+#if INTEL_NEEDS_WA_14017794102 || INTEL_NEEDS_WA_14023061436 || GFX_VER >= 35
+         /* GFX35+: Bspec 73592 (r77799) HSD 14023364992 */
          btd.BTDMidthreadpreemption = false;
 #endif
 
@@ -468,6 +469,33 @@ init_render_queue_state(struct anv_queue *queue, bool is_companion_rcs_batch)
     * number of GPU hangs on ICL.
     */
    anv_batch_emit(batch, GENX(3DSTATE_WM_HZ_OP), hzp);
+
+#if GFX_VERx10 >= 350
+   /* On GFX35+ platforms, we won't need to emit viewport again in depth fast
+    * clear path once a valid one is emitted. Here we always emit a viewport
+    * so the blorp could drop the viewport emission once it is ready.
+    * (Refer to HSD 14021128246.)
+    *
+    * The vieport we use is from blorp dynamic state that has been setup
+    * prior to this stage.
+    */
+   uint32_t dfc_vp_offset =
+      device->blorp.dynamic_states[BLORP_DYNAMIC_STATE_CC_VIEWPORT].offset;
+   if (device->physical->uses_efficient_64bit) {
+      const struct anv_state_pool *pool =
+         anv_device_get_dynamic_state_pool(device);
+      anv_batch_emit(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC_2), vp) {
+         vp.CCViewportPointer = (struct anv_address) {
+            .bo = pool->block_pool.bo,
+            .offset = dfc_vp_offset,
+         };
+      }
+   } else {
+      anv_batch_emit(batch, GENX(3DSTATE_VIEWPORT_STATE_POINTERS_CC), vp) {
+         vp.CCViewportPointer = dfc_vp_offset;
+      }
+   }
+#endif
 
    genX(emit_sample_pattern)(batch, NULL);
 
@@ -1416,6 +1444,11 @@ genX(emit_sampler_state)(const struct anv_device *device,
             .BorderColorGreen = vk_state->border_color_value.float32[1],
             .BorderColorBlue = vk_state->border_color_value.float32[2],
             .BorderColorAlpha = vk_state->border_color_value.float32[3],
+            /* Bspec 57016 (r77793) HSD 22021085527. Also refer to the names of
+             * values and description in the dri option.
+             */
+            .sample_d_performance =
+               device->physical->drirc.perf.sample_d_performance,
          };
 
          assert(ANV_SAMPLER_STATE_DWORDS >= GENX(SAMPLER_STATE_EXTENDED_length));
@@ -1426,7 +1459,13 @@ genX(emit_sampler_state)(const struct anv_device *device,
          struct GENX(SAMPLER_STATE) sampler_state = {
             .SamplerDisable = false,
             .TextureBorderColorMode = DX10OGL,
-
+#if GFX_VER >= 35
+            /* Bspec 57016 (r77793) HSD 22021085527. Also refer to the names of
+             * values and description in the dri option.
+             */
+            .sample_d_performance =
+               device->physical->drirc.perf.sample_d_performance,
+#endif
 #if GFX_VER >= 11
             /* This field is marked as disabled on Gfx20+ */
             .CPSLODCompensationEnable = device->info->ver < 20,
@@ -1665,10 +1704,15 @@ genX(init_trtt_context_state)(struct anv_async_submit *submit)
    anv_batch_write_reg(batch, GENX(COMP_CTX0_TRTT_CR), trtt_cr)
       trtt_cr.TRTTEnable = true;
 
-   if (queue->family->engine_class != INTEL_ENGINE_CLASS_COPY) {
+   if (batch->engine_class == INTEL_ENGINE_CLASS_RENDER ||
+       batch->engine_class == INTEL_ENGINE_CLASS_COMPUTE) {
       genx_batch_emit_pipe_control(batch, device->info, _3D,
                                    ANV_PIPE_CS_STALL_BIT |
                                    ANV_PIPE_TLB_INVALIDATE_BIT);
+   } else {
+      anv_batch_emit(batch, GENX(MI_FLUSH_DW), mfd) {
+         mfd.TLBInvalidate = true;
+      }
    }
 #endif
    return VK_SUCCESS;

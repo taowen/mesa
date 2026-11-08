@@ -10,6 +10,7 @@
 #include "util/format/u_format.h"
 #include "util/u_helpers.h"
 #include "util/u_memory.h"
+#include "util/u_prim.h"
 #include "util/u_string.h"
 #include "util/u_viewport.h"
 
@@ -611,13 +612,6 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
       OUT_RING(ring, A5XX_GRAS_SC_SCREEN_SCISSOR_TL_0_X(scissor->maxx) |
                         A5XX_GRAS_SC_SCREEN_SCISSOR_TL_0_Y(scissor->maxy));
 
-      OUT_PKT4(ring, REG_A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0, 2);
-      OUT_RING(ring, A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_X(scissor->minx) |
-                        A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_Y(scissor->miny));
-      OUT_RING(ring,
-               A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_X(scissor->maxx) |
-                  A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_Y(scissor->maxy));
-
       ctx->batch->max_scissor.minx =
          MIN2(ctx->batch->max_scissor.minx, scissor->minx);
       ctx->batch->max_scissor.miny =
@@ -640,6 +634,14 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
       OUT_RING(ring, A5XX_GRAS_CL_VPORT_YSCALE_0(vp->scale[1]));
       OUT_RING(ring, A5XX_GRAS_CL_VPORT_ZOFFSET_0(vp->translate[2]));
       OUT_RING(ring, A5XX_GRAS_CL_VPORT_ZSCALE_0(vp->scale[2]));
+
+      /* with the clip codes ignored this scissor is what bounds the viewport */
+      struct pipe_scissor_state *vscissor = &ctx->viewport_scissor[0];
+      OUT_PKT4(ring, REG_A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0, 2);
+      OUT_RING(ring, A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_X(vscissor->minx) |
+                        A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_Y(vscissor->miny));
+      OUT_RING(ring, A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_X(vscissor->maxx) |
+                        A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_Y(vscissor->maxy));
    }
 
    if ((dirty & (FD_DIRTY_VIEWPORT | FD_DIRTY_RASTERIZER)) &&
@@ -683,9 +685,6 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
 
       OUT_PKT4(ring, REG_A5XX_PC_RASTER_CNTL, 1);
       OUT_RING(ring, rasterizer->pc_raster_cntl);
-
-      OUT_PKT4(ring, REG_A5XX_GRAS_CL_CNTL, 1);
-      OUT_RING(ring, rasterizer->gras_cl_clip_cntl);
    }
 
    /* note: must come after program emit.. because there is some overlap
@@ -707,12 +706,32 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
                   A5XX_PC_PRIMITIVE_CNTL_STRIDE_IN_VPC(max_loc) |
                   COND(emit->info->primitive_restart && emit->info->index_size,
                        A5XX_PC_PRIMITIVE_CNTL_PRIMITIVE_RESTART));
+
+      enum mesa_prim prim = u_reduced_prim(emit->info->mode);
+      bool guardband = prim == MESA_PRIM_POINTS || prim == MESA_PRIM_LINES;
+
+      OUT_PKT4(ring, REG_A5XX_GRAS_CL_CNTL, 1);
+      OUT_RING(ring, rasterizer->gras_cl_clip_cntl |
+                        COND(guardband, A5XX_GRAS_CL_CNTL_VP_CLIP_CODE_IGNORE));
+
+      OUT_PKT4(ring, REG_A5XX_GRAS_CL_GUARDBAND_CLIP_ADJ, 1);
+      OUT_RING(ring, COND(guardband,
+                          A5XX_GRAS_CL_GUARDBAND_CLIP_ADJ_HORZ(ctx->guardband.x) |
+                          A5XX_GRAS_CL_GUARDBAND_CLIP_ADJ_VERT(ctx->guardband.y)));
    }
 
    if (dirty & (FD_DIRTY_FRAMEBUFFER | FD_DIRTY_RASTERIZER | FD_DIRTY_PROG)) {
       uint32_t posz_regid = ir3_find_output_regid(fp, FRAG_RESULT_DEPTH);
+      uint32_t smask_regid = ir3_find_output_regid(fp, FRAG_RESULT_SAMPLE_MASK);
+      bool writes_smask = fp->writes_smask;
       unsigned nr = pfb->nr_cbufs;
       bool dual = false;
+
+      /* gl_SampleMask is a multisample-only op; ignore it on single-sample. */
+      if (pfb->samples <= 1) {
+         smask_regid = regid(63, 0);
+         writes_smask = false;
+      }
 
       if (emit->binning_pass)
          nr = 0;
@@ -727,13 +746,15 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
       OUT_RING(ring,
                A5XX_RB_FS_OUTPUT_CNTL_MRT(nr) |
                   COND(dual, A5XX_RB_FS_OUTPUT_CNTL_DUAL_COLOR_IN_ENABLE) |
-                  COND(fp->writes_pos, A5XX_RB_FS_OUTPUT_CNTL_FRAG_WRITES_Z));
+                  COND(fp->writes_pos, A5XX_RB_FS_OUTPUT_CNTL_FRAG_WRITES_Z) |
+                  COND(writes_smask,
+                       A5XX_RB_FS_OUTPUT_CNTL_FRAG_WRITES_SAMPMASK));
 
       OUT_PKT4(ring, REG_A5XX_SP_FS_OUTPUT_CNTL, 1);
       OUT_RING(ring, A5XX_SP_FS_OUTPUT_CNTL_MRT(nr) |
                         COND(dual, A5XX_SP_FS_OUTPUT_CNTL_DUAL_COLOR_IN_ENABLE) |
                         A5XX_SP_FS_OUTPUT_CNTL_DEPTH_REGID(posz_regid) |
-                        A5XX_SP_FS_OUTPUT_CNTL_SAMPLEMASK_REGID(regid(63, 0)));
+                        A5XX_SP_FS_OUTPUT_CNTL_SAMPLEMASK_REGID(smask_regid));
    }
 
    ir3_emit_vs_consts(vp, ring, ctx, emit->info, emit->indirect, emit->draw);
@@ -862,14 +883,19 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
       OUT_RING(ring, A5XX_RB_BLEND_ALPHA_F32(bcolor->color[3]));
    }
 
-   if (ctx->dirty_shader[MESA_SHADER_VERTEX] & FD_DIRTY_SHADER_TEX) {
+   /* The program's HLSQ_UPDATE_CNTL write discards state loaded before it
+    * that no draw has used yet, so reload it after the program.
+    */
+   bool reload = dirty & FD_DIRTY_PROG;
+
+   if (reload || (ctx->dirty_shader[MESA_SHADER_VERTEX] & FD_DIRTY_SHADER_TEX)) {
       needs_border |=
          emit_textures(ctx, ring, SB4_VS_TEX, &ctx->tex[MESA_SHADER_VERTEX]);
       OUT_PKT4(ring, REG_A5XX_TPL1_VS_TEX_COUNT, 1);
       OUT_RING(ring, ctx->tex[MESA_SHADER_VERTEX].num_textures);
    }
 
-   if (ctx->dirty_shader[MESA_SHADER_FRAGMENT] & FD_DIRTY_SHADER_TEX) {
+   if (reload || (ctx->dirty_shader[MESA_SHADER_FRAGMENT] & FD_DIRTY_SHADER_TEX)) {
       needs_border |=
          emit_textures(ctx, ring, SB4_FS_TEX, &ctx->tex[MESA_SHADER_FRAGMENT]);
    }
@@ -886,11 +912,11 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
       emit_border_color(ctx, ring);
 
    if (!emit->binning_pass) {
-      if (ctx->dirty_shader[MESA_SHADER_FRAGMENT] & FD_DIRTY_SHADER_SSBO)
+      if (reload || (ctx->dirty_shader[MESA_SHADER_FRAGMENT] & FD_DIRTY_SHADER_SSBO))
          emit_ssbos(ctx, ring, SB4_SSBO, &ctx->shaderbuf[MESA_SHADER_FRAGMENT],
                   fp);
 
-      if (ctx->dirty_shader[MESA_SHADER_FRAGMENT] & FD_DIRTY_SHADER_IMAGE)
+      if (reload || (ctx->dirty_shader[MESA_SHADER_FRAGMENT] & FD_DIRTY_SHADER_IMAGE))
          fd5_emit_images(ctx, ring, MESA_SHADER_FRAGMENT, fp);
    }
 }
@@ -1002,7 +1028,7 @@ fd5_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
    OUT_RING(ring, 0x0000001f); /* PC_MODE_CNTL */
 
    OUT_PKT4(ring, REG_A5XX_SP_MODE_CNTL, 1);
-   OUT_RING(ring, 0x0000001e); /* SP_MODE_CNTL */
+   OUT_RING(ring, 0x0000001c); /* SP_MODE_CNTL */
 
    if (ctx->screen->gpu_id == 540) {
       OUT_PKT4(ring, REG_A5XX_SP_DBG_ECO_CNTL, 1);

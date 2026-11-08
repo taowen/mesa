@@ -52,11 +52,10 @@ enum brw_shader_phase {
 struct brw_shader_params
 {
    const struct brw_compiler *compiler;
-   void *mem_ctx;
+   const struct brw_compile_params *compile_params;
 
+   /* This is the NIR specific to the variant being compiled. */
    const nir_shader *nir;
-   const brw_base_prog_key *key;
-   brw_stage_prog_data *prog_data;
    unsigned dispatch_width;
 
    /* Fragment shader. */
@@ -64,10 +63,7 @@ struct brw_shader_params
    const int *per_primitive_offsets;
 
    bool needs_register_pressure;
-   void *log_data;
    bool debug_enabled;
-
-   debug_archiver *archiver;
 };
 
 struct brw_shader
@@ -94,7 +90,11 @@ public:
    void emit_cs_terminate();
 
    const struct brw_compiler *compiler;
-   void *log_data; /* Passed to compiler->*_log functions */
+
+   /* Parameters for the whole compilation, shared by all the variants.
+    * Valid during the lifetime of this shader.
+    */
+   const struct brw_compile_params * const compile_params;
 
    const struct intel_device_info * const devinfo;
    const nir_shader *nir;
@@ -193,6 +193,9 @@ public:
    brw_reg final_gs_vertex_count;
    brw_reg control_data_bits;
 
+   /* Only used in efficient 64-bit mode */
+   brw_reg scratch64_surface;
+
    struct {
       unsigned control_data_bits_per_vertex;
       unsigned control_data_header_size_bits;
@@ -224,8 +227,6 @@ public:
    unsigned next_address_register_nr;
 
    struct brw_shader_stats shader_stats;
-
-   debug_archiver *archiver;
 
    void debug_optimizer(const nir_shader *nir,
                         const char *pass_name,
@@ -369,6 +370,7 @@ bool brw_opt_cse_defs(brw_shader &s);
 bool brw_opt_dead_code_eliminate(brw_shader &s);
 bool brw_opt_eliminate_find_live_channel(brw_shader &s);
 bool brw_opt_fill_and_spill(brw_shader &s);
+bool brw_opt_mac(brw_shader &s);
 bool brw_opt_predicate_logic(brw_shader &s);
 bool brw_opt_register_coalesce(brw_shader &s);
 bool brw_opt_remove_extra_rounding_modes(brw_shader &s);
@@ -450,3 +452,5 @@ struct brw_to_binary_params {
 };
 
 const unsigned *brw_to_binary(const brw_to_binary_params *p);
+
+brw_reg brw_get_scratch64_surface_state_addr(brw_shader *shader);

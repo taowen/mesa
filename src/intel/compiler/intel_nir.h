@@ -42,6 +42,7 @@ bool intel_nir_lower_patch_vertices_tes(nir_shader *shader);
 bool intel_nir_lower_shading_rate_output(nir_shader *nir);
 bool intel_nir_lower_sparse_intrinsics(nir_shader *nir, bool jay);
 
+bool intel_nir_lower_local_ids(nir_shader *nir);
 bool intel_nir_lower_vec2_surface_sampler(nir_shader *nir);
 
 bool intel_nir_opt_peephole_ffma(nir_shader *shader);
@@ -56,6 +57,12 @@ enum intel_atomic_branch_cases {
 
    /* Load memory before umin/imin and skip if value is larger. */
    INTEL_ATOMIC_BRANCH_MIN = 1 << 2,
+};
+
+enum intel_code_motion {
+   INTEL_CODE_MOTION_DEFAULT = 0,
+   INTEL_CODE_MOTION_LICM = 1,
+   INTEL_CODE_MOTION_GCM = 2,
 };
 
 bool intel_nir_opt_atomic_branch(nir_shader *shader, unsigned enabled_cases);

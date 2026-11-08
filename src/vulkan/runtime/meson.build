@@ -7,6 +7,7 @@
 vulkan_lite_runtime_files = files(
   'rmv/vk_rmv_common.c',
   'rmv/vk_rmv_exporter.c',
+  'vk_app_workarounds.c',
   'vk_blend.c',
   'vk_buffer.c',
   'vk_buffer_view.c',
@@ -25,6 +26,7 @@ vulkan_lite_runtime_files = files(
   'vk_device_memory.c',
   'vk_fence.c',
   'vk_framebuffer.c',
+  'vk_frame_pacer.c',
   'vk_graphics_state.c',
   'vk_image.c',
   'vk_log.c',
@@ -226,15 +228,8 @@ libvulkan_lite_instance = static_library(
 # - idep_vulkan_runtime_headers
 # - idep_vulkan_runtime
 idep_vulkan_lite_runtime_headers = declare_dependency(
-  sources : [
-    spirv_info_h,
-    vk_cmd_enqueue_entrypoints[0],
-    vk_cmd_queue[1],
-    vk_common_entrypoints[0],
-    vk_physical_device_features[1],
-    vk_physical_device_properties[1],
-  ],
   include_directories : include_directories('.'),
+  dependencies : [vulkan_lite_runtime_header_gen_deps]
 )
 
 # This is likely a bug in the Meson VS backend, as MSVC with ninja works fine.

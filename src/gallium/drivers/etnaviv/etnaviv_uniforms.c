@@ -190,6 +190,31 @@ etna_uniforms_write(const struct etna_context *ctx,
          });
          break;
 
+      case ETNA_UNIFORM_CONSTANT_DATA_ADDR:
+         etna_cmd_stream_reloc(stream, &(struct etna_reloc) {
+            .bo = sobj->constant_bo,
+            .flags = ETNA_RELOC_READ,
+            .offset = val,
+         });
+         break;
+
+      case ETNA_UNIFORM_XFB_ADDR:
+         etna_cmd_stream_reloc(stream, &(struct etna_reloc) {
+            .bo = etna_buffer_resource(ctx->streamout.targets[val]->buffer)->bo,
+            .flags = ETNA_RELOC_WRITE,
+            .offset = ctx->streamout.targets[val]->buffer_offset +
+                      ctx->streamout.captured_bytes[val],
+         });
+         break;
+
+      case ETNA_UNIFORM_XFB_NUM_VERTICES:
+         etna_cmd_stream_emit(stream, ctx->streamout.num_vertices);
+         break;
+
+      case ETNA_UNIFORM_XFB_FIRST_VERTEX:
+         etna_cmd_stream_emit(stream, ctx->streamout.first_vertex);
+         break;
+
       case ETNA_UNIFORM_UNUSED:
          etna_cmd_stream_emit(stream, 0);
          break;
@@ -204,10 +229,15 @@ void
 etna_set_shader_uniforms_dirty_flags(struct etna_shader_variant *sobj)
 {
    uint32_t dirty = 0;
+   uint32_t ubo_mask = 0;
 
    for (uint32_t i = 0; i < sobj->uniforms.count; i++) {
       switch (sobj->uniforms.contents[i]) {
       default:
+         break;
+
+      case ETNA_UNIFORM_UBO_ADDR:
+         ubo_mask |= BITFIELD_BIT(sobj->uniforms.data[i]);
          break;
 
       case ETNA_UNIFORM_TEXRECT_SCALE_X:
@@ -223,8 +253,15 @@ etna_set_shader_uniforms_dirty_flags(struct etna_shader_variant *sobj)
       case ETNA_UNIFORM_SAMPLER_LOD_BIAS:
          dirty |= ETNA_DIRTY_SAMPLERS | ETNA_DIRTY_SAMPLER_VIEWS;
          break;
+
+      case ETNA_UNIFORM_XFB_ADDR:
+      case ETNA_UNIFORM_XFB_NUM_VERTICES:
+      case ETNA_UNIFORM_XFB_FIRST_VERTEX:
+         dirty |= ETNA_DIRTY_STREAMOUT;
+         break;
       }
    }
 
    sobj->uniforms_dirty_bits = dirty;
+   sobj->ubo_mask = ubo_mask;
 }

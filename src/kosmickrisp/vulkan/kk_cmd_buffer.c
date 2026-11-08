@@ -13,6 +13,7 @@
 #include "kk_entrypoints.h"
 #include "kk_format.h"
 #include "kk_image_view.h"
+#include "kk_physical_device.h"
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
 #include "kosmickrisp/bridge/mtl_command_buffer.h"
@@ -22,6 +23,7 @@
 
 #include "vk_alloc.h"
 #include "vk_common_entrypoints.h"
+#include "vk_device.h"
 #include "vk_format.h"
 #include "vk_pipeline_layout.h"
 
@@ -1089,9 +1091,11 @@ kk_CmdBeginDebugUtilsLabelEXT(VkCommandBuffer _commandBuffer,
 
    if (cmd->metal.render)
       mtl_encoder_push_debug_group(cmd->metal.render, pLabelInfo->pLabelName);
-
-   if (cmd->metal.compute)
+   else if (cmd->metal.compute)
       mtl_encoder_push_debug_group(cmd->metal.compute, pLabelInfo->pLabelName);
+   else
+      mtl_command_buffer_push_debug_group(cmd->metal.cmd_buf,
+                                          pLabelInfo->pLabelName);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1102,9 +1106,10 @@ kk_CmdEndDebugUtilsLabelEXT(VkCommandBuffer _commandBuffer)
 
    if (cmd->metal.render)
       mtl_encoder_pop_debug_group(cmd->metal.render);
-
-   if (cmd->metal.compute)
+   else if (cmd->metal.compute)
       mtl_encoder_pop_debug_group(cmd->metal.compute);
+   else
+      mtl_command_buffer_pop_debug_group(cmd->metal.cmd_buf);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1112,6 +1117,25 @@ kk_CmdInsertDebugUtilsLabelEXT(VkCommandBuffer _commandBuffer,
                                const VkDebugUtilsLabelEXT *pLabelInfo)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, _commandBuffer);
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+   struct kk_physical_device *pdev = kk_device_physical(dev);
+
+   if (pdev->settings.gpu_capture_enabled &&
+       !pdev->settings.gpu_capture_immediately) {
+      if (!dev->gpu_capture_active &&
+          strcmp(pLabelInfo->pLabelName, "capture-marker,begin_capture") == 0) {
+         dev->gpu_capture_active = true;
+         mtl_start_gpu_capture(dev->mtl_handle, pdev->settings.gpu_capture_dir);
+         return;
+      }
+
+      if (dev->gpu_capture_active &&
+          strcmp(pLabelInfo->pLabelName, "capture-marker,end_capture") == 0) {
+         mtl_stop_gpu_capture();
+         dev->gpu_capture_active = false;
+         return;
+      }
+   }
 
    /* We purposely don't call the common implementation here. It makes
     * debug regions that last until the next vkCmdInsertDebugUtilsLabelEXT()

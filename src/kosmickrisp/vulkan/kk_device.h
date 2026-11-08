@@ -45,6 +45,7 @@ struct mtl_sampler_packed {
    enum mtl_sampler_reduction_mode reduction_mode;
 
    enum mtl_compare_function compare_func;
+   float lod_bias;
    float min_lod;
    float max_lod;
    uint32_t max_anisotropy;
@@ -103,6 +104,8 @@ struct kk_device {
    /* Geomtry heap */
    struct kk_bo *heap;
    util_once_flag heap_init_once;
+
+   bool gpu_capture_active;
 };
 
 VK_DEFINE_HANDLE_CASTS(kk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)

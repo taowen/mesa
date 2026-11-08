@@ -294,6 +294,7 @@ v3d_init_screen_caps(struct v3d_screen *screen)
         caps->compute = screen->has_csd;
 
         caps->generate_mipmap = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_TFU);
+        caps->hw_clear_buffer_sizes = screen->has_tfu_ccol ? 1 | 2 | 4 | 8 | 16 : 0;
 
         caps->indep_blend_enable = true;
 
@@ -791,6 +792,13 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
         screen->fd = fd;
         screen->ro = ro;
 
+        const char *max_cache_size_str = os_get_option("V3D_MAX_BO_CACHE_SIZE");
+        if (max_cache_size_str == NULL)
+                screen->bo_cache.max_cache_size = V3D_DEFAULT_MAX_BO_CACHE_SIZE * 1024 * 1024;
+        else
+                screen->bo_cache.max_cache_size = atoll(max_cache_size_str) * 1024 * 1024;
+        screen->bo_cache.cache_count = 0;
+        screen->bo_cache.cache_size = 0;
         list_inithead(&screen->bo_cache.time_list);
         (void)mtx_init(&screen->bo_cache.lock, mtx_plain);
         (void)mtx_init(&screen->bo_handles_mutex, mtx_plain);
@@ -818,6 +826,11 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
                 driCheckOption(config->options, nonmsaa_name, DRI_BOOL) &&
                 driQueryOptionb(config->options, nonmsaa_name);
 
+        const char *dual_color_name = "dual_color_blend_by_location";
+        screen->dual_color_blend_by_location =
+                driCheckOption(config->options, dual_color_name, DRI_BOOL) &&
+                driQueryOptionb(config->options, dual_color_name);
+
         screen->heap_memory_percent =
                 driQueryOptionf(config->options, "heap_memory_percent");
         if (screen->heap_memory_percent == OS_GPU_HEAP_SIZE_HEURISTIC)
@@ -831,6 +844,7 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
         screen->has_perfmon = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_PERFMON);
         screen->has_cpu_queue = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE);
         screen->has_multisync = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_MULTISYNC_EXT);
+        screen->has_tfu_ccol = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_TFU_CCOL);
 
         v3d_fence_screen_init(screen);
 

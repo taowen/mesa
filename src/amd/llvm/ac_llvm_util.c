@@ -10,6 +10,7 @@
 
 #include <llvm-c/Core.h>
 #include <llvm-c/Support.h>
+#include <llvm-c/Target.h>
 
 #include "c11/threads.h"
 #include "ac_llvm_util.h"

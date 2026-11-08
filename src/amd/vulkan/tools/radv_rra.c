@@ -267,19 +267,19 @@ rra_dump_acceleration_structure(const struct radv_physical_device *pdev,
 
    if (should_validate) {
       if (rra_validate_header(accel_struct, header)) {
-         return VK_ERROR_VALIDATION_FAILED_EXT;
+         return VK_ERROR_VALIDATION_FAILED;
       }
       if (radv_use_bvh8(pdev)) {
          if (rra_validate_node_gfx12(accel_struct_vas, data + header->bvh_offset,
                                      data + header->bvh_offset + src_root_offset, header->geometry_count,
                                      accel_struct->size, !is_tlas, 0)) {
-            return VK_ERROR_VALIDATION_FAILED_EXT;
+            return VK_ERROR_VALIDATION_FAILED;
          }
       } else {
          if (rra_validate_node_gfx10_3(accel_struct_vas, data + header->bvh_offset,
                                        data + header->bvh_offset + src_root_offset, header->geometry_count,
                                        accel_struct->size, !is_tlas, 0)) {
-            return VK_ERROR_VALIDATION_FAILED_EXT;
+            return VK_ERROR_VALIDATION_FAILED;
          }
       }
    }
@@ -666,6 +666,7 @@ rra_map_accel_struct_data(struct rra_copy_context *ctx, uint32_t i)
       return mapped_data;
    }
 
+   VK_FROM_HANDLE(vk_buffer, dst_buffer, ctx->buffer.buffer);
    const struct vk_acceleration_structure *accel_struct = ctx->entries[i]->key;
    VkResult result;
 
@@ -676,21 +677,27 @@ rra_map_accel_struct_data(struct rra_copy_context *ctx, uint32_t i)
    if (result != VK_SUCCESS)
       return NULL;
 
-   VkBufferCopy2 copy = {
-      .sType = VK_STRUCTURE_TYPE_BUFFER_COPY_2,
-      .srcOffset = accel_struct->offset,
-      .size = accel_struct->size,
+   VkDeviceMemoryCopyKHR copy = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_MEMORY_COPY_KHR,
+      .srcRange =
+         {
+            .address = vk_acceleration_structure_get_va(accel_struct),
+            .size = accel_struct->size,
+         },
+      .dstRange =
+         {
+            .address = vk_buffer_address(dst_buffer, 0),
+            .size = accel_struct->size,
+         },
    };
 
-   VkCopyBufferInfo2 copy_info = {
-      .sType = VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
-      .srcBuffer = vk_buffer_to_handle(accel_struct->buffer),
-      .dstBuffer = ctx->buffer.buffer,
+   VkCopyDeviceMemoryInfoKHR copy_info = {
+      .sType = VK_STRUCTURE_TYPE_COPY_DEVICE_MEMORY_INFO_KHR,
       .regionCount = 1,
       .pRegions = &copy,
    };
 
-   radv_CmdCopyBuffer2(ctx->cmd_buffer, &copy_info);
+   radv_CmdCopyMemoryKHR(ctx->cmd_buffer, &copy_info);
 
    result = radv_EndCommandBuffer(ctx->cmd_buffer);
    if (result != VK_SUCCESS)
@@ -1166,10 +1173,12 @@ gamma_dump_acceleration_structure(const struct radv_physical_device *pdev,
    const char *name = vk_object_base_name(&accel_struct->base);
 
    uint64_t bvh_size = radv_header->compacted_size - radv_header->bvh_offset;
+   uint64_t geometry_info_size =
+      radv_header->geometry_count * sizeof(struct gamma_acceleration_structure_geometry_info);
 
    struct gamma_chunk_header chunk_header = {
       .type = gamma_chunk_type_acceleration_structure,
-      .size = sizeof(struct gamma_acceleration_structure_header) + strlen(name) + bvh_size,
+      .size = sizeof(struct gamma_acceleration_structure_header) + geometry_info_size + strlen(name) + bvh_size,
    };
    fwrite(&chunk_header, sizeof(chunk_header), 1, output);
 
@@ -1180,13 +1189,25 @@ gamma_dump_acceleration_structure(const struct radv_physical_device *pdev,
       .type = radv_header->type,
       .geometry_type = radv_header->geometry_type,
       .geometry_count = radv_header->geometry_count,
+      .build_flags = radv_header->build_flags,
       .name_size = strlen(name),
    };
    fwrite(&header, sizeof(header), 1, output);
 
-   struct radv_accel_struct_geometry_info *geometry_infos = (void *)(data + sizeof(struct radv_accel_struct_header));
-   for (uint32_t i = 0; i < radv_header->geometry_count; i++)
-      fwrite(&geometry_infos[i].primitive_count, sizeof(geometry_infos[i].primitive_count), 1, output);
+   uint32_t geometry_infos_offset = 0;
+   if (radv_use_bvh8(pdev))
+      geometry_infos_offset = sizeof(struct radv_accel_struct_header_gfx12);
+   else
+      geometry_infos_offset = sizeof(struct radv_accel_struct_header);
+
+   struct radv_accel_struct_geometry_info *geometry_infos = (void *)(data + geometry_infos_offset);
+   for (uint32_t i = 0; i < radv_header->geometry_count; i++) {
+      struct gamma_acceleration_structure_geometry_info geom_info = {
+         .geometry_flags = geometry_infos[i].flags,
+         .primitive_count = geometry_infos[i].primitive_count,
+      };
+      fwrite(&geom_info, sizeof(geom_info), 1, output);
+   }
 
    fwrite(name, strlen(name), 1, output);
 

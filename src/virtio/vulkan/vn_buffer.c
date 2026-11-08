@@ -329,6 +329,7 @@ struct vn_buffer_create_info {
    VkExternalMemoryBufferCreateInfo external;
    VkBufferOpaqueCaptureAddressCreateInfo capture;
    VkBufferDeviceAddressCreateInfoEXT address;
+   VkBufferUsageFlags2CreateInfo usage2;
 };
 
 static const VkBufferCreateInfo *
@@ -355,6 +356,10 @@ vn_buffer_fix_create_info(
       case VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_CREATE_INFO_EXT:
          memcpy(&local_info->address, src, sizeof(local_info->address));
          next = &local_info->address;
+         break;
+      case VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO:
+         memcpy(&local_info->usage2, src, sizeof(local_info->usage2));
+         next = &local_info->usage2;
          break;
       default:
          break;
@@ -541,10 +546,17 @@ vn_GetDeviceBufferMemoryRequirements(
    }
 
    /* Make the host call if not found in cache or not cacheable */
-   vn_call_vkGetDeviceBufferMemoryRequirements(dev->primary_ring, device,
-                                               pInfo, pMemoryRequirements);
+   if (entry) {
+      reqs.memory.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+      reqs.memory.pNext = &reqs.dedicated;
+      reqs.dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS;
+      vn_call_vkGetDeviceBufferMemoryRequirements(dev->primary_ring, device,
+                                                  pInfo, &reqs.memory);
 
-   /* If cacheable, store mem requirements from the host call */
-   if (entry)
-      vn_buffer_reqs_cache_entry_init(cache, entry, pMemoryRequirements);
+      vn_buffer_reqs_cache_entry_init(cache, entry, &reqs.memory);
+      vn_copy_cached_memory_requirements(&reqs, pMemoryRequirements);
+   } else {
+      vn_call_vkGetDeviceBufferMemoryRequirements(dev->primary_ring, device,
+                                                  pInfo, pMemoryRequirements);
+   }
 }

@@ -1791,15 +1791,15 @@ static_assert(sizeof(MUBUF_instruction) == sizeof(Instruction) + 8, "Unexpected 
 struct MTBUF_instruction : public Instruction {
    memory_sync_info sync;
    ac_hw_cache_flags cache;
-   uint8_t dfmt : 4;         /* Data Format of data in memory buffer */
-   uint8_t nfmt : 3;         /* Numeric format of data in memory */
-   bool offen : 1;           /* Supply an offset from VGPR (VADDR) */
-   bool idxen : 1;           /* Supply an index from VGPR (VADDR) */
-   bool tfe : 1;             /* texture fail enable */
-   bool disable_wqm : 1;     /* Require an exec mask without helper invocations */
+   uint8_t dfmt : 4;     /* Data Format of data in memory buffer */
+   uint8_t nfmt : 3;     /* Numeric format of data in memory */
+   bool offen : 1;       /* Supply an offset from VGPR (VADDR) */
+   bool idxen : 1;       /* Supply an index from VGPR (VADDR) */
+   bool tfe : 1;         /* texture fail enable */
+   bool disable_wqm : 1; /* Require an exec mask without helper invocations */
    uint8_t padding0 : 5;
    uint16_t padding1;
-   uint32_t offset : 23;     /* Unsigned byte offset */
+   uint32_t offset : 23; /* Unsigned byte offset */
    uint32_t padding2 : 9;
 };
 static_assert(sizeof(MTBUF_instruction) == sizeof(Instruction) + 12, "Unexpected padding");
@@ -2069,7 +2069,7 @@ SubdwordCaps get_subdword_definition_caps(Program* program, const Instruction* i
 
 bool opcode_supports_dpp(amd_gfx_level gfx_level, aco_opcode opcode, bool vop3p);
 bool can_use_DPP(amd_gfx_level gfx_level, const aco_ptr<Instruction>& instr, bool dpp8);
-bool can_write_m0(const aco_ptr<Instruction>& instr);
+bool can_write_m0(const Instruction* instr);
 /* updates "instr" and returns the old instruction (or NULL if no update was needed) */
 aco_ptr<Instruction> convert_to_SDWA(amd_gfx_level gfx_level, aco_ptr<Instruction>& instr);
 aco_ptr<Instruction> convert_to_DPP(amd_gfx_level gfx_level, aco_ptr<Instruction>& instr,
@@ -2079,7 +2079,6 @@ bool needs_exec_mask(const Instruction* instr);
 aco_opcode get_vcmp_inverse(aco_opcode op);
 aco_opcode get_vcmp_swapped(aco_opcode op);
 aco_opcode get_vcmpx(aco_opcode op);
-bool is_cmpx(aco_opcode op);
 
 aco_opcode get_swapped_opcode(aco_opcode opcode, unsigned idx0, unsigned idx1);
 bool can_swap_operands(aco_ptr<Instruction>& instr, aco_opcode* new_op, unsigned idx0 = 0,
@@ -2306,6 +2305,7 @@ struct DeviceInfo {
    bool has_point_sample_accel = false;
    bool has_gfx6_mrt_export_bug = false;
    bool has_desc_resource_level = false;
+   bool has_unpacked_d16 = false;
 
    int32_t scratch_global_offset_min;
    int32_t scratch_global_offset_max;
@@ -2338,8 +2338,8 @@ public:
    unsigned wave_size;
    RegClass lane_mask;
    Stage stage;
-   bool needs_exact = false; /* there exists an instruction with disable_wqm = true */
-   bool needs_wqm = false;   /* there exists a p_wqm instruction */
+   bool needs_exact = false;             /* there exists an instruction with disable_wqm = true */
+   bool needs_wqm = false;               /* there exists a p_wqm instruction */
    bool needs_fp_mode_insertion = false; /* insert_fp_mode should be run */
    bool has_smem_buffer_or_global_loads = false;
    bool has_pops_overlapped_waves_wait = false;
@@ -2546,7 +2546,7 @@ void aco_print_program(const Program* program, FILE* output, unsigned flags = 0)
 
 void _aco_err(Program* program, const char* file, unsigned line, const char* fmt, ...);
 
-#define aco_err(program, ...)      _aco_err(program, __FILE__, __LINE__, __VA_ARGS__)
+#define aco_err(program, ...) _aco_err(program, __FILE__, __LINE__, __VA_ARGS__)
 
 /* Returns the indices of operands to which definitions are tied to. */
 aco::small_vec<uint32_t, 2> get_tied_defs(Instruction* instr);
@@ -2635,6 +2635,20 @@ struct aco_alu_opcode_info {
    aco_type def_types[3];
    fixed_reg op_fixed_reg[4];
    fixed_reg def_fixed_reg[3];
+
+   aco_type get_def_type(unsigned idx) const
+   {
+      /* v_cmpx instructions before GFX10 have 2 definitions but only one def_type. */
+      return def_types[MIN2(idx, num_defs - 1u)];
+   }
+
+   fixed_reg get_def_fixed_reg(Instruction* instr, enum amd_gfx_level gfx_level, unsigned idx) const
+   {
+      if (gfx_level < GFX10 && def_fixed_reg[0] == fixed_exec && instr->isVOPC())
+         return idx == 0 ? not_fixed : fixed_exec;
+      else
+         return def_fixed_reg[idx];
+   }
 };
 
 typedef struct {

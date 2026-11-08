@@ -22,6 +22,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#include "util/log.h"
+
 #include "freedreno_pm4.h"
 
 #include "buffers.h"
@@ -373,6 +375,12 @@ static void
 clear_lastvals(void)
 {
    memset(lastvals, 0, sizeof(lastvals));
+}
+
+static void
+reset_lastvals(void)
+{
+   memcpy(lastvals, type0_reg_vals, sizeof(lastvals));
 }
 
 uint32_t
@@ -1309,7 +1317,7 @@ skip_query(void)
             continue;
          }
          uint32_t lastval = reg_val(regbase);
-         if (lastval != lastvals[regbase]) {
+         if (lastval != reg_lastval(regbase)) {
             return false;
          }
       }
@@ -1364,7 +1372,7 @@ __do_query(const char *primtype, uint32_t num_indices)
       if (thread)
          printf("%s:", deprefix(thread, "CP_SET_THREAD_"));
       printf("\t%08"PRIx64, r.value);
-      if (r.value != lastvals[regbase]) {
+      if (r.value != reg_lastval(regbase)) {
          printf("!");
       } else {
          printf(" ");
@@ -1829,6 +1837,9 @@ dump_bindless_descriptors(bool is_compute, int level)
 {
    /* Skip for devices which do not support bindless: */
    if (options->info->chip < 6)
+      return;
+
+   if (quiet(2))
       return;
 
    if (options->summary) {
@@ -2333,12 +2344,15 @@ dump_register_summary(int level, const char *usage)
 
    struct regacc r = regacc(NULL);
 
-   /* dump current state of registers: */
-   printl(2, "%sdraw[%i] register values\n", levels[level], draw_count);
-
    bool changed = false;
    bool written = false;
    bool used = false;
+
+   if (quiet(2))
+      goto out;
+
+   /* dump current state of registers: */
+   printl(2, "%sdraw[%i] register values\n", levels[level], draw_count);
 
    for (i = 0; i < regcnt(); i++) {
       uint32_t regbase = i;
@@ -2354,9 +2368,8 @@ dump_register_summary(int level, const char *usage)
        */
       if (!(options->allregs || written || used))
          continue;
-      if (lastval != lastvals[regbase]) {
+      if (lastval != reg_lastval(regbase)) {
          changed |= true;
-         lastvals[regbase] = lastval;
       }
       if (!quiet(2)) {
          if (regacc_push(&r, regbase, lastval)) {
@@ -2386,7 +2399,9 @@ dump_register_summary(int level, const char *usage)
       }
    }
 
+out:
    clear_rewritten();
+   reset_lastvals();
 
    in_summary = false;
 
@@ -2759,6 +2774,13 @@ cp_indirect(const uint32_t *dwords, uint32_t sizedwords, int level)
        * the IB returned:
        */
       highlight_addr(dwords);
+
+      uint32_t avail = hostlen(ibaddr) / 4;
+      if (ibsize > avail) {
+         mesa_logw_once("%sibsize %u exceeds mapped size %u, clamping\n",
+                        levels[level], ibsize, avail);
+         ibsize = avail;
+      }
 
       ib++;
       ibs[ib].base = ibaddr;
@@ -3276,6 +3298,11 @@ cp_context_reg_bunch(const uint32_t *dwords, uint32_t sizedwords, int level)
    struct regacc r = regacc(NULL);
 
    for (int i = 0; i < sizedwords; i += 2) {
+      if (dwords[i] >= regcnt()) {
+         printl(level + 1, "<invalid reg %08x>\n", dwords[i]);
+         continue;
+      }
+
       if (regacc_push(&r, dwords[i + 0], dwords[i + 1]))
          dump_register(&r, level + 1);
       reg_set(dwords[i + 0], dwords[i + 1]);
@@ -3515,8 +3542,11 @@ dump_commands(const uint32_t *dwords, uint32_t sizedwords, int level)
 
       dwords += count;
       dwords_left -= count;
-   }
 
-   if (dwords_left < 0)
-      printf("**** this ain't right!! dwords_left=%d\n", dwords_left);
+      if (dwords_left < 0) {
+         mesa_logw_once("**** truncated packet, %u dwords past end of buffer\n",
+                        -dwords_left);
+         return;
+      }
+   }
 }

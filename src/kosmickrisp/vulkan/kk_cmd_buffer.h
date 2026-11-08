@@ -87,6 +87,12 @@ struct kk_per_draw_data {
 
    uint64_t base_vertex_addr;
    uint64_t base_instance_addr;
+
+   /* Address of geometry param buffer if a GS is used, else 0 */
+   uint64_t geometry_params;
+
+   /* Whether the last vertex of a primitive is its provoking vertex */
+   uint32_t provoking_last;
 };
 
 struct kk_attachment {
@@ -180,6 +186,13 @@ struct kk_graphics_state {
       struct kk_tess_info info;
       enum mesa_prim prim;
    } tess;
+
+   /* Rasterization draw of the GS output */
+   struct {
+      struct kk_addr_range index;
+      uint32_t index_count;
+      uint32_t instance_count;
+   } gs;
 
    /* Needed by vk_command_buffer::dynamic_graphics_state */
    struct vk_vertex_input_state _dynamic_vi;
@@ -352,6 +365,8 @@ bool kk_attachment_do_renderpass_resolve(const struct kk_attachment *attachment,
 enum kk_grid_mode {
    KK_GRID_DIRECT = 0u,
    KK_GRID_INDIRECT,
+   /* Thread counts, then threadgroup size, like poly's grids */
+   KK_GRID_INDIRECT_LOCAL,
 };
 struct kk_grid {
    enum kk_grid_mode mode;
@@ -391,10 +406,19 @@ kk_grid_indirect(uint64_t addr)
    };
 }
 
+static struct kk_grid
+kk_grid_indirect_local(uint64_t addr)
+{
+   return (struct kk_grid){
+      .mode = KK_GRID_INDIRECT_LOCAL,
+      .addr = addr,
+   };
+}
+
 static bool
 kk_grid_is_indirect(struct kk_grid grid)
 {
-   return grid.mode == KK_GRID_INDIRECT;
+   return grid.mode != KK_GRID_DIRECT;
 }
 
 void kk_dispatch_precomp(struct kk_cmd_buffer *cmd, struct kk_grid grid,

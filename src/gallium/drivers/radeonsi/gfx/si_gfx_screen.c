@@ -17,7 +17,7 @@
 #include <sys/utsname.h>
 
 #if AMD_LLVM_AVAILABLE
-#include <llvm-c/TargetMachine.h>
+#include <llvm-c/Target.h>
 #endif
 
 #include <xf86drm.h>
@@ -123,7 +123,7 @@ static void si_set_max_shader_compiler_threads(struct pipe_screen *screen, unsig
 
    /* This function doesn't allow a greater number of threads than
     * the queue had at its creation. */
-   util_queue_adjust_num_threads(&sscreen->shader_compiler_queue, max_threads, false);
+   util_queue_adjust_num_threads(&sscreen->shader_compiler_queue, max_threads);
    /* Don't change the number of threads on the low priority queue. */
 }
 
@@ -653,6 +653,7 @@ static void si_init_gfx_caps(struct si_screen *sscreen)
    caps->cl_gl_sharing = true;
    caps->call_finalize_nir_in_linker = true;
    caps->blit_3d = true;
+   caps->polygon_stipple = true;
    caps->glsl_bindless_handles_are_32bit = true;
    caps->fbfetch = 1;
 
@@ -888,10 +889,9 @@ bool si_init_gfx_screen(struct si_screen *sscreen) {
       sscreen->info.use_display_dcc_with_retile_blit = false;
    }
 
-   if (sscreen->debug_flags & DBG(SAFE)) {
+   if (sscreen->debug_flags & DBG(SAFE))
       sscreen->options.inline_uniforms = false;
-      sscreen->options.zerovram = true;
-   }
+
    if (sscreen->debug_flags & DBG(SAFER)) {
       sscreen->shader_debug_flags |= DBG(NO_OPT_VARIANT);
       sscreen->shader_debug_flags |= DBG(CHECK_IR);
@@ -1022,9 +1022,6 @@ bool si_init_gfx_screen(struct si_screen *sscreen) {
       glsl_type_singleton_decref();
       return false;
    }
-
-   if (!debug_get_bool_option("RADEON_DISABLE_PERFCOUNTERS", false))
-      si_init_perfcounters(sscreen);
 
    if (sscreen->debug_flags & DBG(NO_OUT_OF_ORDER))
       sscreen->info.has_out_of_order_rast = false;

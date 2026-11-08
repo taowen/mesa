@@ -16,6 +16,35 @@
  * brw_lower_vgrfs_to_fixed_grfs.
  */
 
+static void
+validate_spill_fill_counts(brw_shader &s)
+{
+#ifndef NDEBUG
+   unsigned spill_count = 0;
+   unsigned fill_count = 0;
+
+   foreach_block_and_inst (block, brw_inst, inst, s.cfg) {
+      switch (inst->opcode) {
+      case SHADER_OPCODE_LSC_FILL:
+         fill_count++;
+         break;
+      case SHADER_OPCODE_LSC_SPILL:
+         spill_count++;
+         break;
+      default:
+         break;
+      }
+   }
+
+   /* It would be great if these could be checked for equality, but
+    * nir_intrinsic_load_scratch_intel and nir_intrinsic_store_scratch_intel
+    * translate into generic SENDs that count as fills and spills.
+    */
+   assert(spill_count <= s.shader_stats.spill_count);
+   assert(fill_count <= s.shader_stats.fill_count);
+#endif
+}
+
 static bool
 scratch_intersects(const intel_device_info *devinfo,
                    const brw_scratch_inst *a, const brw_scratch_inst *b)
@@ -48,6 +77,76 @@ scratch_superset(const intel_device_info *devinfo,
    return a_first <= b_first && a_last >= b_last;
 }
 
+static brw_inst *
+generate_mov(brw_shader &s, brw_inst *inst, const brw_reg &src)
+{
+   const unsigned reg_count = DIV_ROUND_UP(inst->size_written, REG_SIZE);
+   const unsigned max_reg_count = 2 * reg_unit(s.devinfo);
+   brw_reg dst = brw_lower_vgrf_to_fixed_grf(s.devinfo, inst, inst->dst);
+
+   assert(src.file != VGRF);
+
+   /* This can occur for fills in wider SIMD modes. In SIMD32 on Xe2, a fill
+    * to r16 followed by a fill to r17 from the same location can't be
+    * trivially replaced. The resulting `mov(32) r17, r16` would have the same
+    * problems of memcpy with overlapping ranges.
+    */
+   if (regions_overlap(dst, inst->size_written,
+                       src, inst->size_written)) {
+      brw_builder bld = brw_builder(inst);
+      const unsigned exec_size = 8 * reg_unit(s.devinfo);
+      const bool reverse = inst->dst.nr > src.nr;
+      unsigned size_written = 0;
+
+      brw_reg dst = inst->dst;
+      brw_reg tmp = src;
+
+      unsigned i = 0;
+      while (size_written < inst->size_written) {
+         brw_inst *mov = bld.group(exec_size, i++).MOV(dst, tmp);
+
+         dst = offset(dst, mov->size_written / REG_SIZE);
+         tmp = offset(tmp, mov->size_written / REG_SIZE);
+         size_written += mov->size_written;
+
+         if (reverse)
+            bld = bld.before(mov);
+      }
+
+      assert(size_written == inst->size_written);
+      return brw_transform_inst(s, inst, BRW_OPCODE_NOP);
+   }
+
+   /* If the resulting MOV would try to write more than 2 registers, emit
+    * multiple MOVs instead.
+    */
+   if (reg_count > max_reg_count) {
+      brw_builder bld = brw_builder(inst);
+      const unsigned exec_size = MIN2(inst->exec_size, 16 * reg_unit(s.devinfo));
+      unsigned size_written = 0;
+
+      brw_reg dst = inst->dst;
+      brw_reg tmp = src;
+
+      unsigned i = 0;
+      while (size_written < inst->size_written) {
+         brw_inst *mov = bld.group(exec_size, i++).MOV(dst, tmp);
+
+         dst = offset(dst, mov->size_written / REG_SIZE);
+         tmp = offset(tmp, mov->size_written / REG_SIZE);
+         size_written += mov->size_written;
+      }
+
+      assert(size_written == inst->size_written);
+      return brw_transform_inst(s, inst, BRW_OPCODE_NOP);
+   }
+
+   inst = brw_transform_inst(s, inst, BRW_OPCODE_MOV);
+   inst->src[0] = src;
+
+   return inst;
+}
+
 static bool
 propagate_fill_to_fill(brw_shader &s, brw_inst *inst, brw_inst **tmp)
 {
@@ -68,36 +167,14 @@ propagate_fill_to_fill(brw_shader &s, brw_inst *inst, brw_inst **tmp)
           scan_inst->size_written == inst->size_written &&
           scan_inst->group == inst->group &&
           scan_inst->as_scratch()->use_transpose == inst->as_scratch()->use_transpose) {
-         const unsigned reg_count = DIV_ROUND_UP(scan_inst->size_written, REG_SIZE);
-         const unsigned max_reg_count = 2 * reg_unit(devinfo);
+         tmp[num_tmp++] = scan_inst;
 
-         /* If the resulting MOV would try to write more than 2 registers,
-          * skip the optimization.
-          *
-          * FINISHME: It shouldn't be hard to generate multiple MOV
-          * instructions below to handle this case.
-          */
-         if (reg_count > max_reg_count)
-            continue;
-
-         if (scan_dst.equals(inst_dst)) {
-            tmp[num_tmp++] = scan_inst;
-         } else {
-            /* This can occur for fills in wider SIMD modes. In SIMD32 on Xe2,
-             * a fill to r16 followed by a fill to r17 from the same location
-             * can't be trivially replaced. The resulting `mov(32) r17, r16`
-             * would have the same problems of memcpy with overlapping ranges.
-             *
-             * FINISHME: This is fixable, but it required emitting two MOVs
-             * with half SIMD size. It might also "just work" if scan_dst.nr <
-             * inst_dst.nr.
-             */
-            if (regions_overlap(scan_dst, scan_inst->size_written,
-                                inst_dst, inst->size_written)) {
-               break;
-            }
-
-            tmp[num_tmp++] = scan_inst;
+         /* Write to the register being filled invalidates the value. */
+         if (!scan_dst.equals(inst_dst) &&
+             regions_overlap(scan_dst, scan_inst->size_written,
+                             inst_dst, inst->size_written)) {
+            dst_was_invalidated = true;
+            break;
          }
       } else {
          /* A spill to the same location invalidates the value. */
@@ -159,10 +236,9 @@ propagate_fill_to_fill(brw_shader &s, brw_inst *inst, brw_inst **tmp)
       }
 
       if (scan_dst.equals(inst_dst)) {
-         scan_inst = brw_transform_inst(s, scan_inst, BRW_OPCODE_NOP);
+         brw_transform_inst(s, scan_inst, BRW_OPCODE_NOP);
       } else {
-         scan_inst = brw_transform_inst(s, scan_inst, BRW_OPCODE_MOV);
-         scan_inst->src[0] = inst->dst;
+         generate_mov(s, scan_inst, inst_dst);
       }
    }
 
@@ -181,6 +257,8 @@ brw_opt_fill_and_spill(brw_shader &s)
 
    brw_inst **tmp = NULL;
    unsigned tmp_size = 0;
+
+   validate_spill_fill_counts(s);
 
    foreach_block(block, s.cfg) {
       bool block_progress = false;
@@ -239,27 +317,15 @@ brw_opt_fill_and_spill(brw_shader &s)
                if (scan_inst->size_written != inst->size_read(devinfo, SPILL_SRC_PAYLOAD2))
                   continue;
 
-               const unsigned reg_count = DIV_ROUND_UP(scan_inst->size_written, REG_SIZE);
-               const unsigned max_reg_count = 2 * reg_unit(devinfo);
-
-               /* If the resulting MOV would try to write more than 2
-                * registers, skip the optimization.
-                *
-                * FINISHME: It shouldn't be hard to generate multiple MOV
-                * instructions below to handle this case.
-                */
-               if (reg_count > max_reg_count)
-                  continue;
-
-               /* Note: block_progress is unconditionally set below. */
                propagate_fill_to_fill(s, scan_inst, tmp);
 
                if (scan_inst->dst.equals(inst->src[SPILL_SRC_PAYLOAD2])) {
                   scan_inst = brw_transform_inst(s, scan_inst, BRW_OPCODE_NOP);
                } else {
-                  scan_inst = brw_transform_inst(s, scan_inst, BRW_OPCODE_MOV);
-                  scan_inst->src[0] = inst->src[SPILL_SRC_PAYLOAD2];
+                  scan_inst = generate_mov(s, scan_inst, spilled);
                }
+
+               assert(scan_inst->opcode != SHADER_OPCODE_LSC_FILL);
 
                s.shader_stats.fill_count--;
                block_progress = true;
@@ -366,5 +432,6 @@ brw_opt_fill_and_spill(brw_shader &s)
       s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
                             BRW_DEPENDENCY_VARIABLES);
 
+   validate_spill_fill_counts(s);
    return progress;
 }

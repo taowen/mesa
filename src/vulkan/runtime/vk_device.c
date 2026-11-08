@@ -270,7 +270,8 @@ vk_device_init(struct vk_device *device,
    }
 
    if (device->enabled_extensions.KHR_calibrated_timestamps ||
-       device->enabled_extensions.EXT_calibrated_timestamps) {
+       device->enabled_extensions.EXT_calibrated_timestamps ||
+       device->enabled_extensions.AMD_anti_lag) {
       /* sorted by preference */
       const VkTimeDomainKHR calibrate_domains[] = {
          VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR,
@@ -338,6 +339,8 @@ vk_device_finish(struct vk_device *device)
 #endif /* VK_USE_PLATFORM_ANDROID_KHR */
 
    simple_mtx_destroy(&device->trace_mtx);
+
+   vk_free(&device->alloc, device->app_workarounds_dispatch_table);
 
    vk_object_base_finish(&device->base);
 }

@@ -301,6 +301,7 @@ if with_tests
   crashdec_tests = [
     ['crash', ['-sf']],
     ['crash_prefetch', ['-sf']],
+    ['crash_mempool', ['-sf']],
   ]
   foreach crashdec_test: crashdec_tests
     name = crashdec_test[0]

@@ -29,6 +29,7 @@
 #include "util/ralloc.h"
 #include "util/hash_table.h"
 #include "util/u_upload_mgr.h"
+#include "util/u_dual_blend.h"
 #include "tgsi/tgsi_dump.h"
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
@@ -458,6 +459,23 @@ struct v3d_cache_key {
         unsigned char blake3[BLAKE3_KEY_LEN];
 };
 
+/* Shaders are suballocated from the state uploader, so one can end exactly
+ * at the end of the upload buffer: leave room for the QPU prefetch.
+ */
+void
+v3d_upload_shader_code(struct v3d_context *v3d,
+                       struct v3d_compiled_shader *shader,
+                       const uint64_t *qpu_insts, uint32_t qpu_size)
+{
+        void *map = NULL;
+
+        u_upload_alloc_ref(v3d->state_uploader, 0,
+                           qpu_size + V3D_QPU_PREFETCH_PAD, 8,
+                           &shader->offset, &shader->resource, &map);
+        if (map)
+                memcpy(map, qpu_insts, qpu_size);
+}
+
 struct v3d_compiled_shader *
 v3d_get_compiled_shader(struct v3d_context *v3d,
                         struct v3d_key *key,
@@ -504,8 +522,8 @@ v3d_get_compiled_shader(struct v3d_context *v3d,
                 ralloc_steal(shader, shader->prog_data.base);
 
                 if (shader->qpu_size) {
-                        u_upload_data_ref(v3d->state_uploader, 0, shader->qpu_size, 8,
-                                      qpu_insts, &shader->offset, &shader->resource);
+                        v3d_upload_shader_code(v3d, shader, qpu_insts,
+                                               shader->qpu_size);
                 }
 
 #ifdef ENABLE_SHADER_CACHE
@@ -663,6 +681,10 @@ v3d_update_compiled_fs(struct v3d_context *v3d, enum mesa_prim prim_mode)
                 !(v3d->active_queries && v3d->current_oq);
 
         key->software_blend = v3d->framebuffer_soft_blend || v3d->blend->use_software;
+        key->force_dual_color_blend =
+                v3d->screen->dual_color_blend_by_location &&
+                v3d->blend->base.rt[0].blend_enable &&
+                util_blend_state_is_dual(&v3d->blend->base, 0);
 
         for (int i = 0; i < v3d->framebuffer.nr_cbufs; i++) {
                 const struct pipe_surface *cbuf = &v3d->framebuffer.cbufs[i];

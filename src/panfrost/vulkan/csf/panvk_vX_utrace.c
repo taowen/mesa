@@ -68,7 +68,7 @@ cmd_copy_data(struct cs_builder *b, uint64_t dst_addr, uint64_t src_addr,
          const struct cs_index reg = cs_scratch_reg_tuple(b, 4, count);
 
          cs_load_to(b, reg, src_addr_reg, BITFIELD_MASK(count), offset);
-         cs_wait_slot(b, SB_ID(LS));
+         cs_wait_ls(b);
          cs_store(b, reg, dst_addr_reg, BITFIELD_MASK(count), offset);
 
          copy_count -= count;
@@ -189,6 +189,7 @@ panvk_per_arch(utrace_context_init)(struct panvk_device *dev)
 
    VkResult result = panvk_priv_bo_create(dev, get_utrace_clone_mem_size(), 0,
                                           VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
+                                          "utrace copy buffer",
                                           &dev->utrace.copy_buf_heap_bo);
    if (result != VK_SUCCESS) {
       u_trace_context_fini(&dev->utrace.utctx);

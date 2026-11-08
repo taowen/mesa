@@ -261,7 +261,7 @@ struct LoadEmitInfo {
    unsigned align_offset = 0;
    pipe_format format;
    nir_src* resource_src = NULL; /* should be equal to resource or NULL */
-   nir_src* offset_src = NULL; /* should be equal to offset or NULL */
+   nir_src* offset_src = NULL;   /* should be equal to offset or NULL */
    isel_context* ctx;
 
    ac_hw_cache_flags cache = {{0, 0, 0, 0}};
@@ -601,8 +601,8 @@ mubuf_load_callback(Builder& bld, const LoadEmitInfo& info, unsigned bytes_neede
       bytes_size = 16;
       op = aco_opcode::buffer_load_dwordx4;
    }
-   aco_ptr<Instruction> mubuf{
-      create_instruction(op, use_mtbuf ? Format::MTBUF : Format::MUBUF, 3 + 2 * info.disable_wqm, 1)};
+   aco_ptr<Instruction> mubuf{create_instruction(op, use_mtbuf ? Format::MTBUF : Format::MUBUF,
+                                                 3 + 2 * info.disable_wqm, 1)};
    mubuf->operands[0] = Operand(info.resource);
    mubuf->operands[1] = vaddr;
    mubuf->operands[2] = soffset;
@@ -679,6 +679,8 @@ mubuf_load_format_callback(Builder& bld, const LoadEmitInfo& info, unsigned byte
       }
    }
 
+   bool unpacked_d16 = info.component_size == 2 && bld.program->dev.has_unpacked_d16;
+
    aco_ptr<Instruction> mubuf{
       create_instruction(op, Format::MUBUF, 3 + info.tfe + 2 * info.disable_wqm, 1)};
    mubuf->operands[0] = Operand(info.resource);
@@ -690,13 +692,37 @@ mubuf_load_format_callback(Builder& bld, const LoadEmitInfo& info, unsigned byte
    mubuf->mubuf().sync = info.sync;
    mubuf->mubuf().offset = info.const_offset;
    mubuf->mubuf().tfe = info.tfe;
-   RegClass rc = RegClass::get(RegType::vgpr, bytes_needed);
-   Temp val = rc == info.dst.regClass() ? info.dst : bld.tmp(rc);
+   RegClass rc = RegClass::get(RegType::vgpr, bytes_needed * (unpacked_d16 ? 2 : 1));
+   Temp val = !unpacked_d16 && rc == info.dst.regClass() ? info.dst : bld.tmp(rc);
    if (info.tfe)
       mubuf->operands[3] = emit_tfe_init(bld, val);
    init_disable_wqm(bld, mubuf->mubuf(), info.disable_wqm);
    mubuf->definitions[0] = Definition(val);
    bld.insert(std::move(mubuf));
+
+   if (unpacked_d16) {
+      rc = RegClass::get(RegType::vgpr, bytes_needed);
+      Temp unpacked_val = val;
+      val = rc == info.dst.regClass() ? info.dst : bld.tmp(rc);
+
+      unsigned num_components = bytes_needed / 2;
+      aco_ptr<Instruction> split{
+         create_instruction(aco_opcode::p_split_vector, Format::PSEUDO, 1, num_components * 2)};
+      split->operands[0] = Operand(unpacked_val);
+
+      aco_ptr<Instruction> vec{
+         create_instruction(aco_opcode::p_create_vector, Format::PSEUDO, num_components, 1)};
+      vec->definitions[0] = Definition(val);
+
+      for (unsigned i = 0; i < num_components; i++) {
+         split->definitions[i * 2] = bld.def(v2b);
+         split->definitions[i * 2 + 1] = bld.def(v2b);
+         vec->operands[i] = Operand(split->definitions[i * 2].getTemp());
+      }
+
+      bld.insert(std::move(split));
+      bld.insert(std::move(vec));
+   }
 
    return val;
 }
@@ -1271,8 +1297,7 @@ visit_store_output(isel_context* ctx, nir_intrinsic_instr* instr)
    if (ls_need_output || ps_need_output) {
       bool stored_to_temps = store_output_to_temps(ctx, instr);
       if (!stored_to_temps) {
-         isel_err(nir_def_instr(instr->src[1].ssa),
-                  "Unimplemented output offset instruction");
+         isel_err(nir_def_instr(instr->src[1].ssa), "Unimplemented output offset instruction");
          abort();
       }
    } else {
@@ -1813,12 +1838,13 @@ visit_image_load(isel_context* ctx, nir_intrinsic_instr* instr)
       expand_mask |= 1 << result_size;
 
    bool d16 = instr->def.bit_size == 16;
+   bool unpacked_d16 = d16 && ctx->program->dev.has_unpacked_d16;
    assert(!d16 || !is_sparse);
 
-   unsigned num_bytes = util_bitcount(dmask) * (d16 ? 2 : 4) + is_sparse * 4;
+   unsigned num_bytes = util_bitcount(dmask) * (d16 && !unpacked_d16 ? 2 : 4) + is_sparse * 4;
 
    Temp tmp;
-   if (num_bytes == dst.bytes() && dst.type() == RegType::vgpr)
+   if (num_bytes == dst.bytes() && dst.type() == RegType::vgpr && !unpacked_d16)
       tmp = dst;
    else
       tmp = bld.tmp(RegClass::get(RegType::vgpr, num_bytes));
@@ -1867,7 +1893,8 @@ visit_image_load(isel_context* ctx, nir_intrinsic_instr* instr)
                        Operand::zero());
    }
 
-   expand_vector(ctx, tmp, dst, instr->def.num_components, expand_mask, instr->def.bit_size == 64);
+   expand_vector(ctx, tmp, dst, instr->def.num_components, expand_mask, instr->def.bit_size == 64,
+                 unpacked_d16);
 }
 
 void
@@ -1878,6 +1905,7 @@ visit_image_store(isel_context* ctx, nir_intrinsic_instr* instr)
    bool is_array = nir_intrinsic_image_array(instr);
    Temp data = get_ssa_temp(ctx, instr->src[3].ssa);
    bool d16 = instr->src[3].ssa->bit_size == 16;
+   bool unpacked_d16 = d16 && ctx->program->dev.has_unpacked_d16;
 
    /* only R64_UINT and R64_SINT supported */
    if (instr->src[3].ssa->bit_size == 64 && data.bytes() > 8)
@@ -1917,8 +1945,8 @@ visit_image_store(isel_context* ctx, nir_intrinsic_instr* instr)
       if (dim == GLSL_SAMPLER_DIM_BUF)
          dmask = BITFIELD_MASK(util_last_bit(dmask));
 
-      if (dmask != BITFIELD_MASK(num_components)) {
-         uint32_t dmask_count = util_bitcount(dmask);
+      if (dmask != BITFIELD_MASK(num_components) || unpacked_d16) {
+         uint32_t dmask_count = util_bitcount(dmask) * (unpacked_d16 ? 2 : 1);
          RegClass rc = d16 ? v2b : v1;
          if (dmask_count == 1) {
             data = emit_extract_vector(ctx, data, ffs(dmask) - 1, rc);
@@ -1928,6 +1956,9 @@ visit_image_store(isel_context* ctx, nir_intrinsic_instr* instr)
             uint32_t index = 0;
             u_foreach_bit (bit, dmask) {
                vec->operands[index++] = Operand(emit_extract_vector(ctx, data, bit, rc));
+
+               if (unpacked_d16)
+                  vec->operands[index++] = Operand(rc);
             }
             data = bld.tmp(RegClass::get(RegType::vgpr, dmask_count * rc.bytes()));
             vec->definitions[0] = Definition(data);
@@ -2711,11 +2742,11 @@ visit_load_buffer(isel_context* ctx, nir_intrinsic_instr* intrin)
 
    /* Swizzled buffer addressing seems to be broken on GFX11 without the idxen bit. */
    bool swizzled = nir_intrinsic_access(intrin) & ACCESS_IS_SWIZZLED_AMD;
-   bool idxen = (swizzled && ctx->program->gfx_level >= GFX11) ||
-                /* GFX9 uses IDXEN to select bounds checking behavior */
-                (ctx->program->gfx_level == GFX9 &&
-                 nir_intrinsic_access(intrin) & ACCESS_USES_FORMAT_AMD) ||
-                !nir_src_is_const(intrin->src[3]) || nir_src_as_uint(intrin->src[3]);
+   bool idxen =
+      (swizzled && ctx->program->gfx_level >= GFX11) ||
+      /* GFX9 uses IDXEN to select bounds checking behavior */
+      (ctx->program->gfx_level == GFX9 && nir_intrinsic_access(intrin) & ACCESS_USES_FORMAT_AMD) ||
+      !nir_src_is_const(intrin->src[3]) || nir_src_as_uint(intrin->src[3]);
    bool v_offset_zero = nir_src_is_const(intrin->src[1]) && !nir_src_as_uint(intrin->src[1]);
    bool s_offset_zero = nir_src_is_const(intrin->src[2]) && !nir_src_as_uint(intrin->src[2]);
 
@@ -2802,11 +2833,11 @@ visit_store_buffer(isel_context* ctx, nir_intrinsic_instr* intrin)
 
    /* Swizzled buffer addressing seems to be broken on GFX11 without the idxen bit. */
    bool swizzled = nir_intrinsic_access(intrin) & ACCESS_IS_SWIZZLED_AMD;
-   bool idxen = (swizzled && ctx->program->gfx_level >= GFX11) ||
-                /* GFX9 uses IDXEN to select bounds checking behavior */
-                (ctx->program->gfx_level == GFX9 &&
-                 nir_intrinsic_access(intrin) & ACCESS_USES_FORMAT_AMD) ||
-                !nir_src_is_const(intrin->src[4]) || nir_src_as_uint(intrin->src[4]);
+   bool idxen =
+      (swizzled && ctx->program->gfx_level >= GFX11) ||
+      /* GFX9 uses IDXEN to select bounds checking behavior */
+      (ctx->program->gfx_level == GFX9 && nir_intrinsic_access(intrin) & ACCESS_USES_FORMAT_AMD) ||
+      !nir_src_is_const(intrin->src[4]) || nir_src_as_uint(intrin->src[4]);
    bool offen = !nir_src_is_const(intrin->src[2]) || nir_src_as_uint(intrin->src[2]);
 
    Temp store_src = get_ssa_temp(ctx, intrin->src[0].ssa);
@@ -3405,8 +3436,8 @@ visit_store_scratch(isel_context* ctx, nir_intrinsic_instr* instr)
          Operand soffset = Operand::c32(0);
          if (!ctx->program->scratch_offsets.empty())
             soffset = Operand(ctx->program->scratch_offsets.back());
-         Instruction* mubuf = bld.mubuf(op, rsrc, offset, soffset,
-                                        write_datas[i], offsets[i], true);
+         Instruction* mubuf =
+            bld.mubuf(op, rsrc, offset, soffset, write_datas[i], offsets[i], true);
          mubuf->mubuf().sync = memory_sync_info(storage_scratch, semantic_private);
          enum ac_access_type type =
             write_datas[i].bytes() < 4 ? ac_access_type_store_subdword : ac_access_type_store;
@@ -4810,7 +4841,7 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
       break;
    }
    case nir_intrinsic_load_ttmp_register_amd:
-   case nir_intrinsic_load_ttmp_register_wg_div_amd:{
+   case nir_intrinsic_load_ttmp_register_wg_div_amd: {
       assert(ctx->options->gfx_level >= GFX12);
       Temp dst = get_ssa_temp(ctx, &instr->def);
       bld.copy(Definition(dst), Operand(PhysReg(108 + nir_intrinsic_base(instr)), s1));
@@ -5118,6 +5149,27 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
          store_scratch_param(ctx, bld, param, stack_ptr, ctx->callee_info.scratch_param_size,
                              get_ssa_temp(ctx, instr->src[0].ssa));
       }
+      break;
+   }
+   case nir_intrinsic_load_abort_buffer_address: {
+      Temp dst = get_ssa_temp(ctx, &instr->def);
+      assert(dst.regClass() == s2);
+
+      Temp addr_lo = bld.sop1(aco_opcode::p_load_symbol, bld.def(s1),
+                              Operand::c32(aco_symbol_abort_buffer_addr_lo));
+      Temp addr_hi = bld.sop1(aco_opcode::p_load_symbol, bld.def(s1),
+                              Operand::c32(aco_symbol_abort_buffer_addr_hi));
+
+      bld.pseudo(aco_opcode::p_create_vector, Definition(dst), addr_lo, addr_hi);
+      emit_split_vector(ctx, dst, 2);
+      break;
+   }
+   case nir_intrinsic_load_abort_buffer_size: {
+      Temp dst = get_ssa_temp(ctx, &instr->def);
+      assert(dst.regClass() == s1);
+
+      bld.sop1(aco_opcode::p_load_symbol, Definition(dst),
+               Operand::c32(aco_symbol_abort_buffer_size));
       break;
    }
    default:

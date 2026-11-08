@@ -28,24 +28,6 @@ v3dv_entrypoints = custom_target(
   depend_files : vk_entrypoints_gen_depend_files,
 )
 
-v3dv_tracepoints = custom_target(
-  'v3dv_tracepoints.[ch]',
-  input: 'v3dv_tracepoints.py',
-  output: [
-    'v3dv_tracepoints.h',
-    'v3dv_tracepoints_perfetto.h',
-    'v3dv_tracepoints.c',
-  ],
-  command: [
-    prog_python, '@INPUT@',
-    '--import-path', join_paths(dir_source_root, 'src/util/perf/'),
-    '--utrace-hdr', '@OUTPUT0@',
-    '--perfetto-hdr', '@OUTPUT1@',
-    '--utrace-src', '@OUTPUT2@',
-  ],
-  depend_files: u_trace_py,
-)
-
 libv3dv_files = files(
   'v3dv_bo.c',
   'v3dv_bo.h',
@@ -61,6 +43,7 @@ libv3dv_files = files(
   'v3dv_event.c',
   'v3dv_format_table.h',
   'v3dv_formats.c',
+  'v3dv_host_copy.c',
   'v3dv_image.c',
   'v3dv_image.h',
   'v3dv_limits.h',
@@ -76,10 +59,9 @@ libv3dv_files = files(
   'v3dv_query.h',
   'v3dv_queue.c',
   'v3dv_uniforms.c',
-  'v3dv_utrace.c',
   'v3dv_version_dispatch.h',
   'v3dv_wsi.c',
-) + [v3d_xml_pack, v3dv_tracepoints[2]]
+) + [v3d_xml_pack]
 
 files_per_version = files(
   'v3dvx_cmd_buffer.c',
@@ -111,11 +93,6 @@ v3dv_deps = [
   idep_mesautil,
 ]
 
-if with_perfetto
-  libv3dv_files += files('v3dv_utrace_perfetto.cc')
-  v3dv_deps += dep_perfetto
-endif
-
 if with_platform_x11
   v3dv_deps += dep_xcb_dri3
 endif
@@ -128,7 +105,7 @@ per_version_libs = []
 foreach ver : v3d_versions
   per_version_libs += static_library(
     'v3dv-v' + ver,
-    [files_per_version, v3d_xml_pack, v3dv_entrypoints[0], v3dv_tracepoints[0], v3dv_drirc[1]],
+    [files_per_version, v3d_xml_pack, v3dv_entrypoints[0], v3dv_drirc[1]],
     include_directories : [
       inc_src, inc_include, inc_broadcom,
       inc_util,
@@ -141,7 +118,7 @@ endforeach
 
 libvulkan_broadcom = shared_library(
   'vulkan_broadcom',
-  [libv3dv_files, v3dv_entrypoints, v3dv_tracepoints, v3dv_drirc, sha1_h],
+  [libv3dv_files, v3dv_entrypoints, v3dv_drirc, sha1_h],
   include_directories : [
     inc_include, inc_src, inc_broadcom, inc_util,
   ],

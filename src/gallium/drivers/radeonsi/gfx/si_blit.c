@@ -507,7 +507,7 @@ static void si_blit_decompress_color(struct si_context *sctx, struct si_texture 
          /* Required before and after FMASK and DCC_DECOMPRESS. */
          if (custom_blend == sctx->custom_blend_fmask_decompress ||
              custom_blend == sctx->custom_blend_dcc_decompress)
-            si_set_barrier_flags(sctx, SI_BARRIER_SYNC_AND_INV_CB);
+            si_set_barrier_flags(sctx, AC_BARRIER_SYNC_AND_INV_CB);
 
          si_blitter_begin(sctx, SI_DECOMPRESS);
          util_blitter_custom_color(sctx->blitter, &cbsurf, custom_blend);
@@ -515,7 +515,7 @@ static void si_blit_decompress_color(struct si_context *sctx, struct si_texture 
 
          if (custom_blend == sctx->custom_blend_fmask_decompress ||
              custom_blend == sctx->custom_blend_dcc_decompress) {
-            si_set_barrier_flags(sctx, SI_BARRIER_SYNC_AND_INV_CB);
+            si_set_barrier_flags(sctx, AC_BARRIER_SYNC_AND_INV_CB);
          }
 
          /* When running FMASK decompression with DCC, we need to run the "eliminate fast clear" pass
@@ -1081,8 +1081,8 @@ static void si_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
       simple_mtx_unlock(&sscreen->async_compute_context_lock);
    }
 
-   if (unlikely(sctx->sqtt_enabled))
-      sctx->sqtt_next_event = EventCmdCopyImage;
+   if (unlikely(si_is_sqtt_active(sctx)))
+      sctx->sqtt.next_event = EventCmdCopyImage;
 
    if (si_compute_blit(sctx, info, NULL, 0, 0, true))
       return;
@@ -1106,8 +1106,8 @@ void si_gfx_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
                              info->src.box.z, info->src.box.z + info->src.box.depth - 1,
                              false);
 
-   if (unlikely(sctx->sqtt_enabled))
-      sctx->sqtt_next_event = EventCmdBlitImage;
+   if (unlikely(si_is_sqtt_active(sctx)))
+      sctx->sqtt.next_event = EventCmdBlitImage;
 
    /* Use a custom MSAA resolving pixel shader. */
    void *fs = NULL;
@@ -1121,7 +1121,7 @@ void si_gfx_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
         /* No scaling */
         (info->dst.box.width == abs(info->src.box.width) &&
          info->dst.box.height == abs(info->src.box.height)))) {
-      union ac_ps_resolve_key key;
+      ac_ps_resolve_key key;
       key.key = 0;
 
       /* LLVM is slower on GFX10.3 and older because it doesn't form VMEM clauses and it's more

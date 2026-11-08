@@ -17,6 +17,7 @@
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
 #include "kosmickrisp/bridge/ns_process_info.h"
+#include "kosmickrisp/compiler/nir_to_msl.h"
 
 #include "util/disk_cache.h"
 #include "util/mesa-blake3.h"
@@ -232,6 +233,7 @@ kk_get_device_features(
       .dualSrcBlend = true,
       .fragmentStoresAndAtomics = true,
       .fullDrawIndexUint32 = true,
+      .geometryShader = true,
       .imageCubeArray = true,
       .independentBlend = true,
       .inheritedQueries = true,
@@ -258,7 +260,7 @@ kk_get_device_features(
       .shaderUniformBufferArrayDynamicIndexing = true,
       .tessellationShader = true,
       .textureCompressionASTC_LDR = true,
-      .textureCompressionBC = true,
+      .textureCompressionBC = pdev->info.supports_bc_texture_compression,
       .textureCompressionETC2 = true,
       .vertexPipelineStoresAndAtomics = true,
 
@@ -267,11 +269,7 @@ kk_get_device_features(
       .samplerYcbcrConversion = true,
       .shaderDrawParameters = true,
       .storageBuffer16BitAccess = true,
-      /* TODO KOSMICKRISP
-       * Disabled due to failing tests (TCS/TES patch I/O):
-       * dEQP-VK.tessellation.tess_io.max_in_out.with_f16.*.tcs_patch_*reads*
-       */
-      .storageInputOutput16 = false,
+      .storageInputOutput16 = true,
       .storagePushConstant16 = true,
       .uniformAndStorageBuffer16BitAccess = true,
       .variablePointers = true,
@@ -538,6 +536,13 @@ kk_get_device_properties(
    float timestamp_period =
       timestamp_frequency ? (1000000000.0f / (float)timestamp_frequency) : 1.0f;
 
+   /* M1 and M2 are restricted to 1024 unique samplers, so there we advertise
+    * the minimum allowed by spec. Otherwise, we advertise the maximum that fit
+    * in our sampler table. */
+   uint32_t max_samplers = pdev->info.max_sampler_count >= MSL_MAX_SAMPLERS
+                              ? MSL_MAX_SAMPLERS
+                              : 4000;
+
    *properties = (struct vk_properties){
       .apiVersion = kk_get_vk_version(),
       .driverVersion = vk_get_driver_version(),
@@ -559,7 +564,7 @@ kk_get_device_properties(
       .maxStorageBufferRange = UINT32_MAX,
       .maxPushConstantsSize = KK_MAX_PUSH_SIZE,
       .maxMemoryAllocationCount = 4096,
-      .maxSamplerAllocationCount = 4000,
+      .maxSamplerAllocationCount = max_samplers,
       .bufferImageGranularity = 16,
       .sparseAddressSpaceSize = KK_SPARSE_ADDR_SPACE_SIZE,
       .maxBoundDescriptorSets = KK_MAX_SETS,
@@ -695,7 +700,7 @@ kk_get_device_properties(
       .independentResolveNone = true,
       .independentResolve = true,
       .driverID = VK_DRIVER_ID_MESA_KOSMICKRISP,
-      .conformanceVersion = (VkConformanceVersion){1, 4, 3, 2},
+      .conformanceVersion = (VkConformanceVersion){1, 4, 6, 2},
       .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
       .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
       .shaderSignedZeroInfNanPreserveFloat16 = true,
@@ -778,7 +783,7 @@ kk_get_device_properties(
       .advancedBlendAllOperations = true,
 
       /* VK_EXT_custom_border_color */
-      .maxCustomBorderColorSamplers = 4000,
+      .maxCustomBorderColorSamplers = max_samplers,
 
       /* VK_EXT_extended_dynamic_state3 */
       .dynamicPrimitiveTopologyUnrestricted = false,
@@ -1049,6 +1054,10 @@ get_metal_limits(struct kk_physical_device *pdev)
       mtl_device_max_buffer_length(pdev->mtl_dev_handle);
    pdev->info.max_sampler_count =
       mtl_device_max_argument_buffer_sampler_count(pdev->mtl_dev_handle);
+   pdev->info.supports_bc_texture_compression =
+      mtl_device_supports_bc_texture_compression(pdev->mtl_dev_handle);
+   pdev->info.supports_32_bit_float_filtering =
+      mtl_device_supports_32_bit_float_filtering(pdev->mtl_dev_handle);
    pdev->info.gpu_apple_family =
       mtl_device_get_gpu_apple_family(pdev->mtl_dev_handle);
 
@@ -1085,13 +1094,21 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
    settings->gpu_capture_enabled =
       debug_get_bool_option("MESA_KK_GPU_CAPTURE", false);
 
+   if (settings->gpu_capture_enabled) {
+      settings->gpu_capture_dir =
+         debug_get_option("MESA_KK_GPU_CAPTURE_DIRECTORY", NULL);
+
+      settings->gpu_capture_immediately =
+         debug_get_bool_option("MESA_KK_GPU_CAPTURE_IMMEDIATELY", false);
+   }
+
    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
    const char *all_workarounds = "all";
    const size_t all_len = strlen(all_workarounds);
    for (unsigned n; n = strcspn(list, ","), *list; list += MAX2(1, n)) {
       if (n == all_len && !strncmp(list, all_workarounds, n)) {
          settings->disabled_workarounds = UINT64_MAX;
-         break;
+         return;
       }
 
       int index = atoi(list);

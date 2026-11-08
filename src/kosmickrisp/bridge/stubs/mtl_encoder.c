@@ -124,6 +124,12 @@ mtl_dispatch_threadgroups_with_indirect_buffer(mtl_compute_encoder *encoder,
 {
 }
 
+void
+mtl_dispatch_threads_with_indirect_buffer(mtl_compute_encoder *encoder,
+                                          uint64_t addr)
+{
+}
+
 /* MTLRenderEncoder */
 mtl_render_encoder *
 mtl_new_render_command_encoder_with_descriptor(

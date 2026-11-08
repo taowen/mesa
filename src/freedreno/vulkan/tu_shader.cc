@@ -9,6 +9,7 @@
 
 #include "nir/nir_xfb_info.h"
 #include "spirv/nir_spirv.h"
+#include "util/blob.h"
 #include "util/macros.h"
 #include "util/mesa-blake3.h"
 #include "vk_nir.h"
@@ -31,9 +32,9 @@ init_ir3_nir_options(struct ir3_shader_nir_options *options,
                      const struct tu_shader_key *key)
 {
    *options = {
-      .robust_modes = (nir_variable_mode)
-         ((key->robust_storage_access2 ? nir_var_mem_ssbo : 0) |
-          (key->robust_uniform_access2 ? nir_var_mem_ubo : 0)),
+      .robust_modes = static_cast<nir_variable_mode>(
+         (key->robust_storage_access2 ? nir_var_mem_ssbo : 0) |
+         (key->robust_uniform_access2 ? nir_var_mem_ubo : 0)),
    };
 }
 
@@ -92,7 +93,7 @@ tu_spirv_to_nir_library(struct tu_device *dev,
     * this here so that nir_remove_dead_variables and split_per_member_structs
     * below see the corresponding stores.
     */
-   NIR_PASS(_, nir, nir_lower_variable_initializers, (nir_variable_mode)~0);
+   NIR_PASS(_, nir, nir_lower_variable_initializers, static_cast<nir_variable_mode>(~0));
 
    NIR_PASS(_, nir, nir_opt_find_array_copies);
    NIR_PASS(_, nir, nir_opt_copy_prop_vars);
@@ -431,7 +432,7 @@ bindless_resource_ir3(nir_builder *b, unsigned base, nir_def *desc_offset,
                                     .desc_set = base,
                                     .access = can_speculate_descriptor ?
                                     ACCESS_CAN_SPECULATE :
-                                    (gl_access_qualifier)0);
+                                    static_cast<gl_access_qualifier>(0));
 }
 
 static bool
@@ -549,7 +550,7 @@ can_speculate_descriptor_load(nir_src array_index,
 {
    return nir_src_is_const(array_index) &&
        (!set_layout->has_variable_descriptors ||
-        binding == set_layout->binding_count - 1) &&
+        binding != set_layout->binding_count - 1) &&
        nir_src_as_uint(array_index) < set_layout->binding[binding].array_size;
 }
 
@@ -570,47 +571,6 @@ build_bindless(struct tu_device *dev, nir_builder *b,
       layout->set[set].layout;
    const struct tu_descriptor_set_binding_layout *bind_layout =
       &set_layout->binding[binding];
-
-   /* input attachments use non bindless workaround */
-   if (bind_layout->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT &&
-       (!dynamic_renderpass ||
-        (var->data.index == NIR_VARIABLE_NO_INDEX ?
-        !(read_only_input_attachments & 0x1) :
-        !(read_only_input_attachments & (1u << (var->data.index + 1))))) &&
-       !TU_DEBUG(DYNAMIC)) {
-      const struct glsl_type *glsl_type = glsl_without_array(var->type);
-      uint32_t idx;
-
-      /* With dynamic renderpasses, we reserve the first two attachments for
-       * input attachments without an InputAttachmentIndex, which must be for
-       * depth/stencil if they are not read-only, and shift over the rest of
-       * the indices.
-       */
-      if (var->data.index == ~0u) {
-         assert(dynamic_renderpass);
-         idx = 0;
-      } else if (dynamic_renderpass) {
-         idx = (var->data.index + 1) * 2;
-      } else {
-         idx = var->data.index * 2;
-      }
-
-      /* Record which input attachments are used for tracking feedback loops */
-      if (dynamic_renderpass)
-         shader->fs.dynamic_input_attachments_used |= (1u << (idx / 2));
-
-      BITSET_SET_RANGE_INSIDE_WORD(b->shader->info.textures_used, idx, (idx + bind_layout->array_size * 2) - 1);
-
-      /* D24S8 workaround: stencil of D24S8 will be sampled as uint */
-      if (glsl_get_sampler_result_type(glsl_type) == GLSL_TYPE_UINT)
-         idx += 1;
-
-      if (deref->deref_type == nir_deref_type_var)
-         return nir_imm_int(b, idx);
-
-      nir_def *arr_index = deref->arr.index.ssa;
-      return nir_iadd_imm(b, nir_imul_imm(b, arr_index, 2), idx);
-   }
 
    shader->active_desc_sets |= 1u << set;
 
@@ -672,7 +632,7 @@ build_texel_buffer_as_image_coords(nir_builder *b,
 {
    nir_def *base_offset = nullptr;
    nir_def *real_size = build_texel_buffer_size(b, desc, &base_offset);
-   nir_def *oob = nir_ige(b, offset, real_size);
+   nir_def *oob = nir_uge(b, offset, real_size);
 
    offset = nir_iadd(b, offset, base_offset);
 
@@ -735,8 +695,8 @@ lower_image_deref(struct tu_device *dev, nir_builder *b,
         instr->intrinsic == nir_intrinsic_image_deref_samples) &&
        descriptor_valid) {
       nir_intrinsic_set_access(instr,
-                               (gl_access_qualifier)(nir_intrinsic_access(instr) |
-                                                     ACCESS_CAN_SPECULATE));
+                               static_cast<gl_access_qualifier>(nir_intrinsic_access(instr) |
+                                                                ACCESS_CAN_SPECULATE));
    }
 
    nir_rewrite_image_intrinsic(instr, bindless,
@@ -987,7 +947,6 @@ lower_tex_immutable(struct tu_device *dev,
        tex->op == nir_texop_lod)
       return;
 
-   assert(tex->texture_index == 0);
    unsigned array_index = 0;
    if (deref->deref_type != nir_deref_type_var) {
       assert(deref->deref_type == nir_deref_type_array);
@@ -1083,11 +1042,103 @@ lower_tex_impl(nir_builder *b, nir_tex_instr *tex, struct tu_device *dev,
 }
 
 static bool
+lower_input_attachment(nir_builder *b, nir_tex_instr *tex,
+                       struct tu_shader *shader,
+                       const struct tu_pipeline_layout *layout,
+                       uint32_t read_only_input_attachments,
+                       bool dynamic_renderpass)
+{
+   if (dynamic_renderpass &&
+       ((tex->input_attachment_depth || tex->input_attachment_stencil) ?
+        (read_only_input_attachments & 0x1) :
+        (read_only_input_attachments & (1u << (tex->texture_index + 1)))))
+      return false;
+
+   if (TU_DEBUG(DYNAMIC))
+      return false;
+
+   uint32_t idx;
+   /* With dynamic renderpasses, we reserve the first two attachments for
+    * input attachments without an InputAttachmentIndex, which must be for
+    * depth/stencil if they are not read-only, and shift over the rest of
+    * the indices.
+    */
+   if (tex->input_attachment_depth) {
+      assert(dynamic_renderpass);
+      idx = 0;
+   } else if (tex->input_attachment_stencil) {
+      assert(dynamic_renderpass);
+      idx = 1;
+   } else if (dynamic_renderpass) {
+      idx = (tex->texture_index + 1) * 2;
+      /* D24S8 workaround: stencil of D24S8 will be sampled as uint */
+      if (nir_alu_type_get_base_type(tex->dest_type) != nir_type_float)
+         idx += 1;
+   } else {
+      idx = tex->texture_index * 2;
+      if (nir_alu_type_get_base_type(tex->dest_type) != nir_type_float)
+         idx += 1;
+   }
+
+   unsigned offset_range = 1;
+   int offset_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+   int handle_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   nir_def *offset = NULL;
+   if (offset_idx >= 0) {
+      offset = tex->src[offset_idx].src.ssa;
+      offset_range = tex->texture_array_size;
+      if (offset_range == 0) {
+         /* If the array size is unspecified, it comes from the pipeline
+          * layout.
+          */
+         nir_deref_instr *deref =
+            nir_src_as_deref(tex->src[handle_idx].src);
+         nir_variable *var = nir_deref_instr_get_variable(deref);
+
+         unsigned set = var->data.descriptor_set;
+         unsigned binding = var->data.binding;
+         const struct tu_descriptor_set_layout *set_layout =
+            layout->set[set].layout;
+         const struct tu_descriptor_set_binding_layout *bind_layout =
+            &set_layout->binding[binding];
+         offset_range = bind_layout->array_size;
+      }
+   }
+
+   /* Record which input attachments are used for tracking feedback loops */
+   if (dynamic_renderpass)
+      shader->fs.dynamic_input_attachments_used |= (1u << (idx / 2));
+
+   BITSET_SET_RANGE_INSIDE_WORD(b->shader->info.textures_used, idx, (idx + offset_range * 2) - 2);
+
+   nir_def *handle = offset ?
+      nir_iadd_imm(b, nir_imul_imm(b, offset, 2), idx) : nir_imm_int(b, idx);
+
+   if (offset_idx >= 0)
+      nir_src_rewrite(&tex->src[offset_idx].src, handle);
+   else
+      nir_tex_instr_add_src(tex, nir_tex_src_texture_offset, handle);
+
+   nir_tex_instr_remove_src(tex, handle_idx);
+   tex->texture_index = 0;
+
+   return true;
+}
+
+static bool
 lower_tex(nir_builder *b, nir_tex_instr *tex, struct tu_device *dev,
           struct tu_shader *shader, const struct tu_pipeline_layout *layout,
           uint32_t read_only_input_attachments, bool dynamic_renderpass)
 {
    tex->can_speculate = true;
+
+   if (tex->sampler_dim == GLSL_SAMPLER_DIM_SUBPASS ||
+       tex->sampler_dim == GLSL_SAMPLER_DIM_SUBPASS_MS) {
+      if (lower_input_attachment(b, tex, shader, layout,
+                                 read_only_input_attachments,
+                                 dynamic_renderpass))
+         return true;
+   }
 
    if (tex->op == nir_texop_block_match_sad_qcom ||
        tex->op == nir_texop_block_match_ssd_qcom ||
@@ -1114,7 +1165,7 @@ struct lower_instr_params {
 static bool
 lower_instr(nir_builder *b, nir_instr *instr, void *cb_data)
 {
-   struct lower_instr_params *params = (struct lower_instr_params *) cb_data;
+   struct lower_instr_params *params = static_cast<struct lower_instr_params *>(cb_data);
    b->cursor = nir_before_instr(instr);
    switch (instr->type) {
    case nir_instr_type_tex:
@@ -1139,7 +1190,7 @@ lower_inline_ubo(nir_builder *b, nir_intrinsic_instr *intrin, void *cb_data)
    if (intrin->intrinsic != nir_intrinsic_load_ubo)
       return false;
 
-   struct lower_instr_params *params = (struct lower_instr_params *) cb_data;
+   struct lower_instr_params *params = static_cast<struct lower_instr_params *>(cb_data);
    struct tu_shader *shader = params->shader;
    const struct tu_pipeline_layout *layout = params->layout;
 
@@ -1206,7 +1257,7 @@ lower_inline_ubo(nir_builder *b, nir_intrinsic_instr *intrin, void *cb_data)
       val = nir_load_global_offset(
          b, intrin->num_components, intrin->def.bit_size,
          nir_pack_64_2x32(b, base_addr), offset,
-         .access = (enum gl_access_qualifier)(
+         .access = static_cast<enum gl_access_qualifier>(
             ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE),
          .align_mul = 16, .align_offset = 0, .range = range);
    } else {
@@ -1320,8 +1371,8 @@ set_speculate_intrinsic(nir_intrinsic_instr *intrin,
         intrin->intrinsic == nir_intrinsic_get_ssbo_size) &&
        can_speculate) {
       nir_intrinsic_set_access(intrin,
-                               (gl_access_qualifier)(nir_intrinsic_access(intrin) |
-                                                     ACCESS_CAN_SPECULATE));
+                               static_cast<gl_access_qualifier>(nir_intrinsic_access(intrin) |
+                                                                ACCESS_CAN_SPECULATE));
    }
 
    /* We need to communicate this to descriptor lowering, which happens in a
@@ -1335,7 +1386,7 @@ set_speculate_intrinsic(nir_intrinsic_instr *intrin,
 static bool
 set_speculate_instr(nir_builder *b, nir_instr *instr, void *cb_data)
 {
-   struct lower_instr_params *params = (struct lower_instr_params *) cb_data;
+   struct lower_instr_params *params = static_cast<struct lower_instr_params *>(cb_data);
    if (instr->type == nir_instr_type_intrinsic) {
       return set_speculate_intrinsic(nir_instr_as_intrinsic(instr),
                                      params->layout);
@@ -1367,7 +1418,6 @@ gather_push_constants(nir_shader *shader, struct tu_shader *tu_shader)
             uint32_t range = nir_intrinsic_range(intrin);
             min = MIN2(min, base);
             max = MAX2(max, base + range);
-            break;
          }
       }
    }
@@ -1411,6 +1461,7 @@ shader_uses_push_consts(nir_shader *shader)
 static bool
 tu_lower_io(nir_shader *shader, struct tu_device *dev,
             struct tu_shader *tu_shader,
+            const struct ir3_shader_key *ir3_key,
             const struct tu_pipeline_layout *layout,
             uint32_t read_only_input_attachments,
             bool dynamic_renderpass,
@@ -1429,7 +1480,7 @@ tu_lower_io(nir_shader *shader, struct tu_device *dev,
     */
    if (shader->info.stage == MESA_SHADER_VERTEX) {
       uint32_t num_driver_params =
-         ir3_nir_scan_driver_consts(dev->compiler, shader, nullptr);
+         ir3_nir_scan_driver_consts(dev->compiler, shader, ir3_key, nullptr);
       ir3_alloc_driver_params(const_allocs, &num_driver_params, dev->compiler,
                               shader->info.stage);
    }
@@ -1561,7 +1612,8 @@ tu_lower_io(nir_shader *shader, struct tu_device *dev,
 
       if (dev->physical_device->reserved_set_idx >= 0) {
          const_state->num_bindless_base_addresses =
-            MAX2(layout->num_sets, (unsigned) dev->physical_device->reserved_set_idx + 1);
+            MAX2(layout->num_sets,
+                 static_cast<unsigned>(dev->physical_device->reserved_set_idx) + 1);
       }
 
       if (!dev->compiler->info->props.load_shader_consts_via_preamble) {
@@ -1616,20 +1668,24 @@ struct lower_fdm_options {
    bool adjust_fragcoord;
    bool use_layer;
    bool adjust_gmem_fragcoord;
+   bool gmem_depth_stencil;
+   uint32_t gmem_input_attachment;
 };
 
 static bool
 lower_fdm_filter(const nir_instr *instr, const void *data)
 {
    const struct lower_fdm_options *options =
-      (const struct lower_fdm_options *)data;
+      static_cast<const struct lower_fdm_options *>(data);
 
    if (instr->type != nir_instr_type_intrinsic)
       return false;
 
    nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
    return intrin->intrinsic == nir_intrinsic_load_frag_size ||
-      intrin->intrinsic == nir_intrinsic_load_frag_coord_gmem_ir3 ||
+      intrin->intrinsic == nir_intrinsic_load_input_attachment_coord ||
+      intrin->intrinsic == nir_intrinsic_load_depth_input_attachment_coord ||
+      intrin->intrinsic == nir_intrinsic_load_stencil_input_attachment_coord ||
       (intrin->intrinsic == nir_intrinsic_load_frag_coord &&
        options->adjust_fragcoord);
 }
@@ -1638,64 +1694,91 @@ static nir_def *
 lower_fdm_instr(struct nir_builder *b, nir_instr *instr, void *data)
 {
    const struct lower_fdm_options *options =
-      (const struct lower_fdm_options *)data;
+      static_cast<const struct lower_fdm_options *>(data);
 
    nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
 
-   nir_def *view;
-   if (options->num_views > 1) {
-      gl_varying_slot slot = options->use_layer ?
-         VARYING_SLOT_LAYER : VARYING_SLOT_VIEW_INDEX;
-      nir_variable *view_var =
-         nir_find_variable_with_location(b->shader, nir_var_shader_in,
-                                         slot);
+   gl_varying_slot slot = options->use_layer ?
+      VARYING_SLOT_LAYER : VARYING_SLOT_VIEW_INDEX;
+   nir_variable *layer_var =
+      nir_find_variable_with_location(b->shader, nir_var_shader_in,
+                                      slot);
 
-      if (view_var == NULL) {
-         view_var = nir_variable_create(b->shader, nir_var_shader_in,
-                                        glsl_int_type(), NULL);
-         view_var->data.location = slot;
-         view_var->data.interpolation = INTERP_MODE_FLAT;
-         view_var->data.driver_location = b->shader->num_inputs++;
-      }
+   if (layer_var == NULL) {
+      layer_var = nir_variable_create(b->shader, nir_var_shader_in,
+                                      glsl_int_type(), NULL);
+      layer_var->data.location = slot;
+      layer_var->data.interpolation = INTERP_MODE_FLAT;
+      layer_var->data.driver_location = b->shader->num_inputs++;
+   }
 
-      view = nir_load_var(b, view_var);
-   } else {
+   nir_def *layer = nir_load_var(b, layer_var);
+
+   nir_def *view = layer;
+   if (options->num_views == 1) {
+      /* If FDM is not per-layer, force frag_size/frag_offset to use layer 0.
+       */
       view = nir_imm_int(b, 0);
    }
 
    nir_def *frag_size =
       nir_load_frag_size_ir3(b, view, .range = options->num_views);
 
-   if (intrin->intrinsic == nir_intrinsic_load_frag_coord) {
+   if (intrin->intrinsic == nir_intrinsic_load_frag_coord ||
+       intrin->intrinsic == nir_intrinsic_load_input_attachment_coord ||
+       intrin->intrinsic == nir_intrinsic_load_depth_input_attachment_coord ||
+       intrin->intrinsic == nir_intrinsic_load_stencil_input_attachment_coord) {
       nir_def *frag_offset =
          nir_load_frag_offset_ir3(b, view, .range = options->num_views);
       nir_def *unscaled_coord = nir_load_frag_coord_unscaled_ir3(b);
-      nir_def *xy = nir_trim_vector(b, unscaled_coord, 2);
-      xy = nir_fmul(b, nir_fsub(b, xy, frag_offset), nir_i2f32(b, frag_size));
-      return nir_vec4(b,
-                      nir_channel(b, xy, 0),
-                      nir_channel(b, xy, 1),
-                      nir_channel(b, unscaled_coord, 2),
-                      nir_channel(b, unscaled_coord, 3));
-   }
+      nir_def *unscaled_xy = nir_trim_vector(b, unscaled_coord, 2);
+      nir_def *xy = unscaled_xy;
+      if (options->adjust_fragcoord)
+         xy = nir_fmul(b, nir_fsub(b, unscaled_xy, frag_offset), nir_i2f32(b, frag_size));
 
-   if (intrin->intrinsic == nir_intrinsic_load_frag_coord_gmem_ir3) {
-      nir_def *unscaled_coord = nir_load_frag_coord_unscaled_ir3(b);
+      if (intrin->intrinsic == nir_intrinsic_load_frag_coord) {
+         return nir_vec4(b,
+                         nir_channel(b, xy, 0),
+                         nir_channel(b, xy, 1),
+                         nir_channel(b, unscaled_coord, 2),
+                         nir_channel(b, unscaled_coord, 3));
+      } else {
+         if (options->adjust_fragcoord) {
+            /* Calculate fragment coordinates in rendering space. This is the
+             * space used to access attachments in GMEM.
+             */
+            nir_def *gmem_xy = unscaled_xy;
+            if (options->adjust_gmem_fragcoord) {
+               nir_def *gmem_frag_offset =
+                  nir_load_gmem_frag_offset_ir3(b, view, .range = options->num_views);
+               nir_def *gmem_frag_scale =
+                  nir_load_gmem_frag_scale_ir3(b, view, .range = options->num_views);
+               gmem_xy = nir_fadd(b, nir_fmul(b, unscaled_xy, gmem_frag_scale),
+                                  gmem_frag_offset);
+            }
 
-      if (!options->adjust_gmem_fragcoord)
-         return unscaled_coord;
+            /* Select between gmem_xy (the xy coordinates in rendering space) and
+             * xy (the xy coordinates in framebuffer space) depending on whether
+             * the input attachment is in GMEM or not.
+             */
+            if (intrin->intrinsic == nir_intrinsic_load_depth_input_attachment_coord ||
+                intrin->intrinsic == nir_intrinsic_load_stencil_input_attachment_coord) {
+               if (options->gmem_depth_stencil)
+                  xy = gmem_xy;
+            } else {
+               unsigned base = nir_intrinsic_base(intrin);
+               nir_def *offset = intrin->src[0].ssa;
+               nir_def *is_gmem =
+                  nir_i2b(b, nir_iand(b, nir_ishr(b, nir_imm_int(b, options->gmem_input_attachment >> base), offset),
+                                      nir_imm_int(b, 1)));
+               xy = nir_bcsel(b, is_gmem, gmem_xy, xy);
+            }
+         }
 
-      nir_def *frag_offset =
-         nir_load_gmem_frag_offset_ir3(b, view, .range = options->num_views);
-      nir_def *frag_scale =
-         nir_load_gmem_frag_scale_ir3(b, view, .range = options->num_views);
-      nir_def *xy = nir_trim_vector(b, unscaled_coord, 2);
-      xy = nir_fadd(b, nir_fmul(b, xy, frag_scale), frag_offset);
-      return nir_vec4(b,
-                      nir_channel(b, xy, 0),
-                      nir_channel(b, xy, 1),
-                      nir_channel(b, unscaled_coord, 2),
-                      nir_channel(b, unscaled_coord, 3));
+         xy = nir_f2i32(b, xy);
+         return nir_vec3(b, nir_channel(b, xy, 0), nir_channel(b, xy, 1),
+                         layer);
+      }
    }
 
    assert(intrin->intrinsic == nir_intrinsic_load_frag_size);
@@ -1706,14 +1789,15 @@ static bool
 tu_nir_lower_fdm(nir_shader *shader, const struct lower_fdm_options *options)
 {
    return nir_shader_lower_instructions(shader, lower_fdm_filter,
-                                        lower_fdm_instr, (void *)options);
+                                        lower_fdm_instr,
+                                        const_cast<struct lower_fdm_options *>(options));
 }
 
 static bool
 lower_ssbo_descriptor_instr(nir_builder *b, nir_intrinsic_instr *intrin,
                             void *cb_data)
 {
-   struct tu_device *dev = (struct tu_device *)cb_data;
+   struct tu_device *dev = static_cast<struct tu_device *>(cb_data);
 
    /* Descriptor index has to be adjusted in the following cases:
     *  - isam loads, when the 16-bit descriptor cannot also be used for 32-bit
@@ -1763,7 +1847,7 @@ tu_nir_lower_ssbo_descriptor(nir_shader *shader,
 {
    return nir_shader_intrinsics_pass(shader, lower_ssbo_descriptor_instr,
                                      nir_metadata_control_flow,
-                                     (void *)dev);
+                                     dev);
 }
 
 static nir_def *
@@ -1820,7 +1904,7 @@ build_ssbo_global_addr(nir_builder *b,
       11 * 4);
    nir_def *descriptor_words = nir_load_global_offset(
       b, 2, 32, nir_pack_64_2x32(b, set_base), descriptor_offset,
-      .access = (enum gl_access_qualifier)(
+      .access = static_cast<enum gl_access_qualifier>(
          ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE),
       .align_mul = 4, .align_offset = 0);
 
@@ -1897,7 +1981,8 @@ tu_nir_lower_ssbo_address_size(
    nir_shader *shader, const struct lower_ssbo_address_size_state *state)
 {
    return nir_shader_intrinsics_pass(shader, lower_ssbo_address_size,
-                                     nir_metadata_control_flow, (void *) state);
+                                     nir_metadata_control_flow,
+                                     const_cast<struct lower_ssbo_address_size_state *>(state));
 }
 
 struct lower_fdm_state {
@@ -1909,7 +1994,7 @@ static bool
 lower_layered_fdm_instr(nir_builder *b, nir_intrinsic_instr *intrin,
                         void *cb)
 {
-   struct lower_fdm_state *state = (struct lower_fdm_state *)cb;
+   struct lower_fdm_state *state = static_cast<struct lower_fdm_state *>(cb);
    if (intrin->intrinsic != nir_intrinsic_store_deref)
       return false;
 
@@ -2290,7 +2375,7 @@ tu6_emit_xs_constants(
       int size_vec4s = DIV_ROUND_UP(xs->constant_data_size, 16);
       tu_cs_emit_qw(cs,
                     iova |
-                    (uint64_t)A6XX_UBO_1_SIZE(size_vec4s) << 32);
+                    static_cast<uint64_t>(A6XX_UBO_1_SIZE(size_vec4s)) << 32);
    }
 
    /* emit statically-known FS driver param */
@@ -2311,7 +2396,7 @@ tu6_emit_xs_constants(
       tu_cs_emit(cs, CP_LOAD_STATE6_1_EXT_SRC_ADDR(0));
       tu_cs_emit(cs, CP_LOAD_STATE6_2_EXT_SRC_ADDR_HI(0));
       int size_vec4s = DIV_ROUND_UP(size, 4);
-      tu_cs_emit_qw(cs, iova | ((uint64_t)A6XX_UBO_1_SIZE(size_vec4s) << 32));
+      tu_cs_emit_qw(cs, iova | (static_cast<uint64_t>(A6XX_UBO_1_SIZE(size_vec4s)) << 32));
    } else if (stage == MESA_SHADER_FRAGMENT && const_state->num_driver_params > 0) {
       uint32_t base =
          const_state->allocs.consts[IR3_CONST_ALLOC_DRIVER_PARAMS].offset_vec4;
@@ -2347,10 +2432,11 @@ tu6_emit_cs_config(struct tu_cs *cs,
       ir3_const_state(v)->push_consts_type == IR3_PUSH_CONSTS_SHARED;
 
    with_crb (cs) {
-      tu6_emit_shared_consts_enable<CHIP>(crb, shared_consts_enable);
-
+      /* A6XX: SP_UPDATE_CNTL must happen before HLSQ_SHARED_CONSTS(), see tu6_emit_program_config */
       crb.add(SP_UPDATE_CNTL(CHIP, .cs_state = true, .cs_uav = true,
-                             .cs_shared_const = shared_consts_enable));
+                             .cs_shared_const = CHIP == A6XX));
+
+      tu6_emit_shared_consts_enable<CHIP>(crb, shared_consts_enable);
       tu6_emit_xs_config<CHIP>(crb, { .cs = v });
       tu6_emit_xs<CHIP>(crb, cs->device, MESA_SHADER_COMPUTE, v, pvtmem, binary_iova);
    }
@@ -2358,7 +2444,7 @@ tu6_emit_cs_config(struct tu_cs *cs,
 
    tu_crb crb = cs->crb(0);
 
-   uint32_t shared_size = MAX2(((int) v->shared_size - 1) / 1024, 1);
+   uint32_t shared_size = MAX2((static_cast<int>(v->shared_size) - 1) / 1024, 1);
    enum a6xx_const_ram_mode mode =
       v->constlen > 256 ? CONSTLEN_512 :
       (v->constlen > 192 ? CONSTLEN_256 :
@@ -2699,9 +2785,14 @@ tu6_emit_fs_inputs(struct tu_cs *cs, const struct ir3_shader_variant *fs)
    unsigned primid_loc = ir3_find_input_loc(fs, VARYING_SLOT_PRIMITIVE_ID);
    unsigned viewid_loc = ir3_find_input_loc(fs, VARYING_SLOT_VIEW_INDEX);
 
+   unsigned num_nonpos_var = fs->total_in;
+   if (FD_QUIRK(cs->device->physical_device->info, QCTDD08049535_numnonposvar_alignment) &&
+       (DIV_ROUND_UP(num_nonpos_var, 4) & 1))
+      num_nonpos_var += 4;
+
    tu_cs_emit_regs(
       cs,
-      VPC_PS_CNTL(CHIP, .numnonposvar = fs->total_in, .primidloc = primid_loc,
+      VPC_PS_CNTL(CHIP, .numnonposvar = num_nonpos_var, .primidloc = primid_loc,
                   .varying = fs && fs->total_in, .viewidloc = viewid_loc));
 }
 
@@ -2723,7 +2814,7 @@ tu6_emit_fs_outputs(struct tu_cs *cs,
    assert(!fs->color0_mrt);
    for (uint32_t i = 0; i < ARRAY_SIZE(fragdata_regid); i++) {
       int output_idx =
-         ir3_find_output(fs, (gl_varying_slot) (FRAG_RESULT_DATA0 + i));
+         ir3_find_output(fs, static_cast<gl_varying_slot>(FRAG_RESULT_DATA0 + i));
 
       if (output_idx < 0) {
          fragdata_regid[i] = INVALID_REG;
@@ -2879,10 +2970,6 @@ tu6_emit_hs(struct tu_cs *cs,
    tu_cs_emit_pkt4(cs, REG_A6XX_VFD_CNTL_2, 1);
    tu_cs_emit(cs, A6XX_VFD_CNTL_2_REGID_HSRELPATCHID(hs_rel_patch_regid) |
                   A6XX_VFD_CNTL_2_REGID_INVOCATIONID(hs_invocation_regid));
-
-   if (hs) {
-      tu_cs_emit_regs(cs, PC_HS_PARAM_0(CHIP, hs->tess.tcs_vertices_out));
-   }
 }
 TU_GENX(tu6_emit_hs);
 
@@ -2944,7 +3031,7 @@ tu6_emit_gs(struct tu_cs *cs,
       uint32_t vertices_out, invocations;
 
       vertices_out = gs->gs.vertices_out - 1;
-      enum a6xx_tess_output output = primitive_to_tess((enum mesa_prim) gs->gs.output_primitive);
+      enum a6xx_tess_output output = primitive_to_tess(static_cast<enum mesa_prim>(gs->gs.output_primitive));
       invocations = gs->gs.invocations - 1;
 
       uint32_t primitive_cntl =
@@ -3205,16 +3292,23 @@ tu_upload_shader(struct tu_device *dev,
    struct tu_cs sub_cs;
    tu_cs_begin_sub_stream(&shader->cs, xs_size +
                           tu_xs_get_additional_cs_size_dwords(v), &sub_cs);
+   /* For SW multiview (no HW multiview), pass view_mask=0 to avoid enabling
+    * the HW stereo rendering registers (PC/VFD_STEREO_RENDERING_CNTL).
+    */
+   uint32_t hw_view_mask =
+      dev->physical_device->info->props.has_hw_multiview
+         ? shader->view_mask : 0;
+
    TU_CALLX(dev, tu6_emit_variant)(
       &sub_cs, shader->variant->type, shader->variant, &pvtmem_config,
-      shader->view_mask, iova);
+      hw_view_mask, iova);
    shader->state = tu_cs_end_draw_state(&shader->cs, &sub_cs);
 
    if (safe_const) {
       tu_cs_begin_sub_stream(&shader->cs, xs_size +
                              tu_xs_get_additional_cs_size_dwords(safe_const), &sub_cs);
       TU_CALLX(dev, tu6_emit_variant)(
-         &sub_cs, v->type, safe_const, &pvtmem_config, shader->view_mask,
+         &sub_cs, v->type, safe_const, &pvtmem_config, hw_view_mask,
          safe_const_iova);
       shader->safe_const_state = tu_cs_end_draw_state(&shader->cs, &sub_cs);
    }
@@ -3223,7 +3317,7 @@ tu_upload_shader(struct tu_device *dev,
       tu_cs_begin_sub_stream(&shader->cs, xs_size + vpc_size +
                              tu_xs_get_additional_cs_size_dwords(binning), &sub_cs);
       TU_CALLX(dev, tu6_emit_variant)(
-         &sub_cs, v->type, binning, &pvtmem_config, shader->view_mask,
+         &sub_cs, v->type, binning, &pvtmem_config, hw_view_mask,
          binning_iova);
       /* emit an empty VPC */
       TU_CALLX(dev, tu6_emit_vpc)(&sub_cs, binning, NULL, NULL, NULL, NULL);
@@ -3234,7 +3328,7 @@ tu_upload_shader(struct tu_device *dev,
       tu_cs_begin_sub_stream(&shader->cs, xs_size + vpc_size +
          tu_xs_get_additional_cs_size_dwords(safe_const_binning), &sub_cs);
       TU_CALLX(dev, tu6_emit_variant)(
-         &sub_cs, v->type, safe_const_binning, &pvtmem_config, shader->view_mask,
+         &sub_cs, v->type, safe_const_binning, &pvtmem_config, hw_view_mask,
          safe_const_binning_iova);
       /* emit an empty VPC */
       TU_CALLX(dev, tu6_emit_vpc)(&sub_cs, safe_const_binning, NULL, NULL, NULL, NULL);
@@ -3315,41 +3409,44 @@ tu_shader_init(struct tu_device *dev, const void *key_data, size_t key_size)
    return shader;
 }
 
-static bool
-tu_shader_serialize(struct vk_pipeline_cache_object *object,
-                    struct blob *blob)
+template <typename IO>
+static void
+tu_shader_cache_process_blob(IO &io, struct tu_shader *shader)
 {
-   struct tu_shader *shader =
-      container_of(object, struct tu_shader, base);
+   io.bytes(&shader->const_state, sizeof(shader->const_state));
+   io.bytes(shader->dynamic_descriptor_sizes, sizeof(shader->dynamic_descriptor_sizes));
+   io.u32(shader->view_mask);
+   io.u8(shader->active_desc_sets);
+   io.boolean(shader->per_layer_viewport);
 
-   blob_write_bytes(blob, &shader->const_state, sizeof(shader->const_state));
-   blob_write_bytes(blob, &shader->dynamic_descriptor_sizes,
-                    sizeof(shader->dynamic_descriptor_sizes));
-   blob_write_uint32(blob, shader->view_mask);
-   blob_write_uint8(blob, shader->active_desc_sets);
-   blob_write_uint8(blob, shader->per_layer_viewport);
+   io.variant(shader->variant);
 
-   ir3_store_variant(blob, shader->variant);
-
-   if (shader->safe_const_variant) {
-      blob_write_uint8(blob, 1);
-      ir3_store_variant(blob, shader->safe_const_variant);
-   } else {
-      blob_write_uint8(blob, 0);
-   }
-
-
+   uint8_t has_safe_const;
+   if constexpr (IO::is_write())
+      has_safe_const = shader->safe_const_variant ? 1 : 0;
+   io.u8(has_safe_const);
+   if (has_safe_const)
+      io.variant(shader->safe_const_variant);
 
    switch (shader->variant->type) {
    case MESA_SHADER_TESS_EVAL:
-      blob_write_bytes(blob, &shader->tes, sizeof(shader->tes));
+      io.bytes(&shader->tes, sizeof(shader->tes));
       break;
    case MESA_SHADER_FRAGMENT:
-      blob_write_bytes(blob, &shader->fs, sizeof(shader->fs));
+      io.bytes(&shader->fs, sizeof(shader->fs));
       break;
    default:
       break;
    }
+}
+
+static bool
+tu_shader_serialize(struct vk_pipeline_cache_object *object, struct blob *blob)
+{
+   struct tu_shader *shader = container_of(object, struct tu_shader, base);
+
+   ir3_blob_write writer { blob };
+   tu_shader_cache_process_blob(writer, shader);
 
    return true;
 }
@@ -3368,29 +3465,8 @@ tu_shader_deserialize(struct vk_pipeline_cache *cache,
    if (!shader)
       return NULL;
 
-   blob_copy_bytes(blob, &shader->const_state, sizeof(shader->const_state));
-   blob_copy_bytes(blob, &shader->dynamic_descriptor_sizes,
-                   sizeof(shader->dynamic_descriptor_sizes));
-   shader->view_mask = blob_read_uint32(blob);
-   shader->active_desc_sets = blob_read_uint8(blob);
-   shader->per_layer_viewport = blob_read_uint8(blob);
-
-   shader->variant = ir3_retrieve_variant(blob, dev->compiler, NULL);
-
-   bool has_safe_const = blob_read_uint8(blob);
-   if (has_safe_const)
-      shader->safe_const_variant = ir3_retrieve_variant(blob, dev->compiler, NULL);
-
-   switch (shader->variant->type) {
-   case MESA_SHADER_TESS_EVAL:
-      blob_copy_bytes(blob, &shader->tes, sizeof(shader->tes));
-      break;
-   case MESA_SHADER_FRAGMENT:
-      blob_copy_bytes(blob, &shader->fs, sizeof(shader->fs));
-      break;
-   default:
-      break;
-   }
+   ir3_blob_read reader { blob, dev->compiler };
+   tu_shader_cache_process_blob(reader, shader);
 
    VkResult result = tu_upload_shader(dev, shader);
    if (result != VK_SUCCESS) {
@@ -3413,41 +3489,45 @@ tu_lower_nir(struct tu_device *dev,
    };
    NIR_PASS(_, nir, nir_opt_access, &access_options);
 
+   bool has_hw_multiview =
+      dev->physical_device->info->props.has_hw_multiview;
+
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       const nir_input_attachment_options att_options = {
-         /* When using multiview rendering, we must use
-          * gl_ViewIndex as the layer id to pass to the texture
-          * sampling function. gl_Layer doesn't work when
-          * multiview is enabled.
-          */
-         .use_view_id_for_layer = key->multiview_mask != 0,
-         .gmem_depth_stencil_ir3 =
-            key->dynamic_renderpass && !(key->read_only_input_attachments & 1),
-         .gmem_input_attachment_ir3 =
-            key->dynamic_renderpass ?
-            ~(key->read_only_input_attachments >> 1) :
-            key->unscaled_input_fragcoord,
+         .use_ia_coord_intrin = true,
       };
       NIR_PASS(_, nir, nir_lower_input_attachments, &att_options);
 
       const nir_lower_sysvals_to_varyings_options sysval_options = {
          .point_coord = true,
          .layer_id = true,
-         .view_index = true,
+         /* The view index varying relies on the fixed-function view-id
+          * injection at VPC_PS_CNTL::VIEWIDLOC, which only works on devices
+          * with HW multiview.  On devices without it, don't convert
+          * load_view_index to a varying here: with a nonzero view mask
+          * tu_nir_lower_multiview_sw_fs replaces it with a gl_Layer read,
+          * and with a zero view mask tu_nir_lower_view_to_zero folds it to
+          * the spec-mandated constant zero (reading the unwritten varying
+          * would return garbage, at least on a702).
+          */
+         .view_index = has_hw_multiview,
       };
       NIR_PASS(_, nir, nir_lower_sysvals_to_varyings, &sysval_options);
    }
 
-   /* This has to happen before lower_input_attachments, because we have to
-    * lower input attachment coordinates except if unscaled.
-    */
    const struct lower_fdm_options fdm_options = {
       .num_views = MAX2(key->multiview_mask ?
                         util_last_bit(key->multiview_mask) :
                         key->max_fdm_layers, 1),
       .adjust_fragcoord = key->fragment_density_map,
-      .use_layer = !key->multiview_mask,
+      .use_layer = !key->multiview_mask || !has_hw_multiview,
       .adjust_gmem_fragcoord = key->fragment_density_map && key->custom_resolve,
+      .gmem_depth_stencil =
+         key->dynamic_renderpass && !(key->read_only_input_attachments & 1),
+      .gmem_input_attachment =
+         key->dynamic_renderpass ?
+         ~(key->read_only_input_attachments >> 1) :
+         key->unscaled_input_fragcoord,
    };
    NIR_PASS(_, nir, tu_nir_lower_fdm, &fdm_options);
 
@@ -3474,8 +3554,26 @@ tu_lower_nir(struct tu_device *dev,
    bool is_last_stage =
     (nir->info.stage == MESA_SHADER_VERTEX && !ir3_key->has_gs && !ir3_key->tessellation);
 
-   if (nir->info.stage == MESA_SHADER_VERTEX && key->multiview_mask)
-      tu_nir_lower_multiview(nir, key->multiview_mask, dev, is_last_stage);
+   if (nir->info.stage == MESA_SHADER_VERTEX && key->multiview_mask) {
+      if (has_hw_multiview) {
+         tu_nir_lower_multiview(nir, key->multiview_mask, dev, is_last_stage);
+      } else if (is_last_stage) {
+         /* SW multiview: the view index is passed as a driver param and
+          * each draw is duplicated per-view on the CPU side.  Add a
+          * gl_Layer output so the rasterizer targets the right layer.
+          */
+         tu_nir_lower_multiview_sw_vs(nir);
+      }
+   }
+
+   if (nir->info.stage == MESA_SHADER_FRAGMENT && key->multiview_mask &&
+       !has_hw_multiview) {
+      /* SW multiview FS: read the view index from gl_Layer instead of
+       * from the HW-provided view index sysval.
+       */
+      tu_nir_lower_multiview_sw_fs(nir);
+   }
+
    if (nir->info.stage == MESA_SHADER_GEOMETRY)
       nir->info.view_mask = key->multiview_mask;
 
@@ -3595,7 +3693,7 @@ tu_shader_create(struct tu_device *dev,
    }
 
    struct ir3_const_allocations const_allocs = {};
-   NIR_PASS(_, nir, tu_lower_io, dev, shader, layout,
+   NIR_PASS(_, nir, tu_lower_io, dev, shader, ir3_key, layout,
             key->read_only_input_attachments, key->dynamic_renderpass,
             &const_allocs);
 
@@ -3808,7 +3906,7 @@ tu_compile_shaders(struct tu_device *device,
    void *mem_ctx = ralloc_context(NULL);
 
    for (mesa_shader_stage stage = MESA_SHADER_VERTEX; stage < MESA_SHADER_STAGES;
-        stage = (mesa_shader_stage) (stage + 1)) {
+        stage = static_cast<mesa_shader_stage>(stage + 1)) {
       const VkPipelineShaderStageCreateInfo *stage_info = stage_infos[stage];
       if (!stage_info)
          continue;
@@ -3829,10 +3927,26 @@ tu_compile_shaders(struct tu_device *device,
    if (nir[MESA_SHADER_GEOMETRY])
       ir3_key.has_gs = true;
 
+   /* On devices without HW multiview support, multiview is emulated by
+    * duplicating draws on the CPU and passing the view index as a VS driver
+    * param.  Flag the ir3 key so the compiler makes load_view_index read that
+    * driver param instead of the HW SYSTEM_VALUE_VIEW_INDEX sysval.
+    */
+   if (!device->physical_device->info->props.has_hw_multiview) {
+      for (mesa_shader_stage stage = MESA_SHADER_VERTEX;
+           stage < MESA_SHADER_STAGES;
+           stage = static_cast<mesa_shader_stage>(stage + 1)) {
+         if (keys[stage].multiview_mask) {
+            ir3_key.sw_multiview = true;
+            break;
+         }
+      }
+   }
+
    if (nir_initial_disasm) {
       for (mesa_shader_stage stage = MESA_SHADER_VERTEX;
            stage < MESA_SHADER_STAGES;
-           stage = (mesa_shader_stage) (stage + 1)) {
+           stage = static_cast<mesa_shader_stage>(stage + 1)) {
       if (!nir[stage])
          continue;
 
@@ -3842,7 +3956,7 @@ tu_compile_shaders(struct tu_device *device,
    }
 
    for (mesa_shader_stage stage = MESA_SHADER_VERTEX; stage < MESA_SHADER_STAGES;
-        stage = (mesa_shader_stage) (stage + 1)) {
+        stage = static_cast<mesa_shader_stage>(stage + 1)) {
       if (!nir[stage])
          continue;
 
@@ -3857,7 +3971,7 @@ tu_compile_shaders(struct tu_device *device,
 
    if (nir_out) {
       for (mesa_shader_stage stage = MESA_SHADER_VERTEX;
-           stage < MESA_SHADER_STAGES; stage = (mesa_shader_stage) (stage + 1)) {
+           stage < MESA_SHADER_STAGES; stage = static_cast<mesa_shader_stage>(stage + 1)) {
          if (!nir[stage])
             continue;
 
@@ -3894,7 +4008,7 @@ tu_compile_shaders(struct tu_device *device,
    }
 
    for (mesa_shader_stage stage = MESA_SHADER_VERTEX; stage < MESA_SHADER_STAGES;
-        stage = (mesa_shader_stage) (stage + 1)) {
+        stage = static_cast<mesa_shader_stage>(stage + 1)) {
       if (!nir[stage])
          continue;
 
@@ -3916,7 +4030,7 @@ tu_compile_shaders(struct tu_device *device,
       ir3_key.tcs_store_primid = true;
 
    for (mesa_shader_stage stage = MESA_SHADER_VERTEX; stage < MESA_SHADER_STAGES;
-        stage = (mesa_shader_stage) (stage + 1)) {
+        stage = static_cast<mesa_shader_stage>(stage + 1)) {
       if (!nir[stage] || shaders[stage])
          continue;
 
@@ -3924,7 +4038,7 @@ tu_compile_shaders(struct tu_device *device,
 
       unsigned char shader_blake3[BLAKE3_KEY_LEN + 1];
       memcpy(shader_blake3, pipeline_blake3, BLAKE3_KEY_LEN);
-      shader_blake3[BLAKE3_KEY_LEN] = (unsigned char) stage;
+      shader_blake3[BLAKE3_KEY_LEN] = static_cast<unsigned char>(stage);
 
       result = tu_shader_create(device,
                                 &shaders[stage], nir[stage], &keys[stage],
@@ -3946,7 +4060,7 @@ fail:
    ralloc_free(mem_ctx);
 
    for (mesa_shader_stage stage = MESA_SHADER_VERTEX; stage < MESA_SHADER_STAGES;
-        stage = (mesa_shader_stage) (stage + 1)) {
+        stage = static_cast<mesa_shader_stage>(stage + 1)) {
       if (shaders[stage]) {
          tu_shader_destroy(device, shaders[stage]);
       }
@@ -4140,9 +4254,9 @@ tu_shader_destroy(struct tu_device *dev,
       tu_bo_finish(dev, shader->pvtmem_bo);
 
    if (shader->variant)
-      ralloc_free((void *)shader->variant);
+      ralloc_free(const_cast<struct ir3_shader_variant *>(shader->variant));
    if (shader->safe_const_variant)
-      ralloc_free((void *)shader->safe_const_variant);
+      ralloc_free(const_cast<struct ir3_shader_variant *>(shader->safe_const_variant));
 
    vk_free(&dev->vk.alloc, shader);
 }

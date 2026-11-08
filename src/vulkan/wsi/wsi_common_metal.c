@@ -1135,6 +1135,7 @@ wsi_metal_configure_image(const struct wsi_swapchain *chain,
 
    if (chain->blit.type != WSI_SWAPCHAIN_NO_BLIT) {
       info->create.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+      info->usage2.usage |= VK_IMAGE_USAGE_2_TRANSFER_SRC_BIT_KHR;
       info->wsi.blit_src = true;
       info->finish_create = wsi_metal_allocate_command_buffer;
       info->select_image_memory_type = wsi_select_device_memory_type;

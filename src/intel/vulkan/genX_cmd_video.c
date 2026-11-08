@@ -60,6 +60,24 @@ genX(CmdBeginVideoCodingKHR)(VkCommandBuffer commandBuffer,
    }
 }
 
+static bool
+anv_video_rc_config_changed(const struct anv_video_rc_state *a,
+                            const struct anv_video_rc_state *b)
+{
+   return a->average_bitrate != b->average_bitrate ||
+          a->max_bitrate != b->max_bitrate ||
+          a->frame_rate_num != b->frame_rate_num ||
+          a->frame_rate_den != b->frame_rate_den ||
+          a->vbv_size_bits != b->vbv_size_bits ||
+          a->vbv_initial_fullness_bits != b->vbv_initial_fullness_bits ||
+          a->min_qp != b->min_qp ||
+          a->max_qp != b->max_qp ||
+          a->gop_frame_count != b->gop_frame_count ||
+          a->idr_period != b->idr_period ||
+          a->consecutive_b_frames != b->consecutive_b_frames ||
+          a->rc_flags != b->rc_flags;
+}
+
 void
 genX(CmdControlVideoCodingKHR)(VkCommandBuffer commandBuffer,
                                const VkVideoCodingControlInfoKHR *pCodingControlInfo)
@@ -70,17 +88,95 @@ genX(CmdControlVideoCodingKHR)(VkCommandBuffer commandBuffer,
       anv_batch_emit(&cmd_buffer->batch, GENX(MI_FLUSH_DW), flush) {
          flush.VideoPipelineCacheInvalidate = 1;
       }
+
+      /* From the Vulkan 1.4 spec, "Video Coding Control":
+       *
+       *    "For encode sessions, the reset operation returns rate control
+       *    configuration to implementation default settings and sets the
+       *    video encode quality level to zero."
+       */
+      struct anv_video_session *vid = cmd_buffer->video.vid;
+      vid->rc_mode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DEFAULT_KHR;
+      memset(&vid->rc, 0, sizeof(vid->rc));
    }
 
    if (pCodingControlInfo->flags &  VK_VIDEO_CODING_CONTROL_ENCODE_RATE_CONTROL_BIT_KHR) {
       const struct VkVideoEncodeRateControlInfoKHR *rate_control_info =
          vk_find_struct_const(pCodingControlInfo->pNext, VIDEO_ENCODE_RATE_CONTROL_INFO_KHR);
+      struct anv_video_session *vid = cmd_buffer->video.vid;
+      struct anv_video_rc_state *rc = &vid->rc;
+      const struct anv_video_rc_state old_rc = *rc;
+      const VkVideoEncodeRateControlModeFlagBitsKHR old_rc_mode = vid->rc_mode;
 
-      /* Support for only CQP rate control for the moment */
-      assert((rate_control_info->rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DEFAULT_KHR) ||
-             (rate_control_info->rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR));
+      vid->rc_mode = rate_control_info->rateControlMode;
 
-      cmd_buffer->video.vid->rc_mode = rate_control_info->rateControlMode;
+      if (rate_control_info->layerCount > 0) {
+         const VkVideoEncodeRateControlLayerInfoKHR *layer = &rate_control_info->pLayers[0];
+
+         rc->average_bitrate = layer->averageBitrate;
+         rc->max_bitrate = layer->maxBitrate;
+         rc->frame_rate_num = layer->frameRateNumerator;
+         rc->frame_rate_den = layer->frameRateDenominator;
+
+         rc->vbv_size_bits = rate_control_info->virtualBufferSizeInMs ?
+            rate_control_info->virtualBufferSizeInMs * layer->averageBitrate / 1000 :
+            layer->averageBitrate * 2;
+         rc->vbv_initial_fullness_bits = rate_control_info->initialVirtualBufferSizeInMs ?
+            rate_control_info->initialVirtualBufferSizeInMs * layer->averageBitrate / 1000 :
+            layer->averageBitrate;
+
+         const VkVideoEncodeH265RateControlLayerInfoKHR *h265_layer =
+            vk_find_struct_const(layer->pNext, VIDEO_ENCODE_H265_RATE_CONTROL_LAYER_INFO_KHR);
+         const VkVideoEncodeH264RateControlLayerInfoKHR *h264_layer =
+            vk_find_struct_const(layer->pNext, VIDEO_ENCODE_H264_RATE_CONTROL_LAYER_INFO_KHR);
+         const VkVideoEncodeAV1RateControlLayerInfoKHR *av1_layer =
+            vk_find_struct_const(layer->pNext, VIDEO_ENCODE_AV1_RATE_CONTROL_LAYER_INFO_KHR);
+         if (av1_layer) {
+            if (av1_layer->useMinQIndex)
+               rc->min_qp = MIN3(av1_layer->minQIndex.intraQIndex,
+                                 av1_layer->minQIndex.predictiveQIndex,
+                                 av1_layer->minQIndex.bipredictiveQIndex);
+            if (av1_layer->useMaxQIndex)
+               rc->max_qp = MAX3(av1_layer->maxQIndex.intraQIndex,
+                                 av1_layer->maxQIndex.predictiveQIndex,
+                                 av1_layer->maxQIndex.bipredictiveQIndex);
+         } else if (h265_layer) {
+            if (h265_layer->useMinQp)
+               rc->min_qp = MIN3(h265_layer->minQp.qpI, h265_layer->minQp.qpP, h265_layer->minQp.qpB);
+            if (h265_layer->useMaxQp)
+               rc->max_qp = MAX3(h265_layer->maxQp.qpI, h265_layer->maxQp.qpP, h265_layer->maxQp.qpB);
+         } else if (h264_layer) {
+            if (h264_layer->useMinQp)
+               rc->min_qp = MIN3(h264_layer->minQp.qpI, h264_layer->minQp.qpP, h264_layer->minQp.qpB);
+            if (h264_layer->useMaxQp)
+               rc->max_qp = MAX3(h264_layer->maxQp.qpI, h264_layer->maxQp.qpP, h264_layer->maxQp.qpB);
+         }
+      }
+
+      const VkVideoEncodeH265RateControlInfoKHR *h265_rc =
+         vk_find_struct_const(pCodingControlInfo->pNext, VIDEO_ENCODE_H265_RATE_CONTROL_INFO_KHR);
+      const VkVideoEncodeH264RateControlInfoKHR *h264_rc =
+         vk_find_struct_const(pCodingControlInfo->pNext, VIDEO_ENCODE_H264_RATE_CONTROL_INFO_KHR);
+      const VkVideoEncodeAV1RateControlInfoKHR *av1_rc =
+         vk_find_struct_const(pCodingControlInfo->pNext, VIDEO_ENCODE_AV1_RATE_CONTROL_INFO_KHR);
+      if (av1_rc) {
+         rc->gop_frame_count = av1_rc->gopFrameCount;
+         rc->idr_period = av1_rc->keyFramePeriod;
+         rc->consecutive_b_frames = av1_rc->consecutiveBipredictiveFrameCount;
+      } else if (h265_rc) {
+         rc->gop_frame_count = h265_rc->gopFrameCount;
+         rc->idr_period = h265_rc->idrPeriod;
+         rc->consecutive_b_frames = h265_rc->consecutiveBFrameCount;
+         rc->rc_flags = h265_rc->flags;
+      } else if (h264_rc) {
+         rc->gop_frame_count = h264_rc->gopFrameCount;
+         rc->idr_period = h264_rc->idrPeriod;
+         rc->consecutive_b_frames = h264_rc->consecutiveBFrameCount;
+         rc->rc_flags = h264_rc->flags;
+      }
+
+      if (vid->rc_mode != old_rc_mode || anv_video_rc_config_changed(&old_rc, rc))
+         rc->brc_reset = true;
    }
 }
 
@@ -449,16 +545,17 @@ anv_h265_decode_video(struct anv_cmd_buffer *cmd_buffer,
 #endif
    }
 
+   struct anv_address src_addr =
+      anv_address_add(src_buffer->address, frame_info->srcBufferOffset);
+
    anv_batch_emit(&cmd_buffer->batch, GENX(HCP_IND_OBJ_BASE_ADDR_STATE), indirect) {
-      indirect.HCPIndirectBitstreamObjectBaseAddress =
-         anv_address_add(src_buffer->address, frame_info->srcBufferOffset & ~4095);
+      indirect.HCPIndirectBitstreamObjectBaseAddress = anv_address_align_down(src_addr, 4096);
 
       indirect.HCPIndirectBitstreamObjectAddressAttributes =
          ANV_VID_ATTR(cmd_buffer->device, src_buffer->address.bo);
 
       indirect.HCPIndirectBitstreamObjectAccessUpperBound =
-         anv_address_add(src_buffer->address,
-                         align64(frame_info->srcBufferRange + frame_info->srcBufferOffset, 4096));
+         anv_address_align(anv_address_add(src_addr, frame_info->srcBufferRange), 4096);
 
       indirect.HCPIndirectCUObjectAddressAttributes =
          ANV_VID_ATTR(cmd_buffer->device, NULL);
@@ -805,9 +902,11 @@ anv_h264_decode_video(struct anv_cmd_buffer *cmd_buffer,
          ANV_VID_ATTR(cmd_buffer->device, ref_bo);
    }
 
+   struct anv_address src_addr =
+      anv_address_add(src_buffer->address, frame_info->srcBufferOffset);
+
    anv_batch_emit(&cmd_buffer->batch, GENX(MFX_IND_OBJ_BASE_ADDR_STATE), index_obj) {
-      index_obj.MFXIndirectBitstreamObjectAddress = anv_address_add(src_buffer->address,
-                                                                    frame_info->srcBufferOffset & ~4095);
+      index_obj.MFXIndirectBitstreamObjectAddress = anv_address_align_down(src_addr, 4096);
       index_obj.MFXIndirectBitstreamObjectAttributes =
          ANV_VID_ATTR(cmd_buffer->device, src_buffer->address.bo);
       index_obj.MFXIndirectMVObjectAttributes =
@@ -976,7 +1075,7 @@ anv_h264_decode_video(struct anv_cmd_buffer *cmd_buffer,
       avc_directmode.POCList[33] = h264_pic_info->pStdPictureInfo->PicOrderCnt[1];
    }
 
-   uint32_t buffer_offset = frame_info->srcBufferOffset & 4095;
+   uint32_t buffer_offset = anv_address_physical(src_addr) & 4095;
 #define HEADER_OFFSET 3
    for (unsigned s = 0; s < h264_pic_info->sliceCount; s++) {
       bool last_slice = s == (h264_pic_info->sliceCount - 1);
@@ -1925,9 +2024,11 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
 #endif
    };
 
+   struct anv_address src_addr =
+      anv_address_add(src_buffer->address, frame_info->srcBufferOffset);
+
    anv_batch_emit(&cmd_buffer->batch, GENX(AVP_IND_OBJ_BASE_ADDR_STATE), ind) {
-      ind.AVPIndirectBitstreamObjectBaseAddress = anv_address_add(src_buffer->address,
-                                                                  frame_info->srcBufferOffset & ~4095);
+      ind.AVPIndirectBitstreamObjectBaseAddress = anv_address_align_down(src_addr, 4096);
       ind.AVPIndirectBitstreamObjectAddressAttributes =
          ANV_VID_ATTR(cmd_buffer->device, src_buffer->address.bo);
 #if GFX_VERx10 >= 125
@@ -2469,7 +2570,7 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
 
    anv_batch_emit(&cmd_buffer->batch, GENX(AVP_BSD_OBJECT), bsd) {
       bsd.TileIndirectBSDDataLength = av1_pic_info->pTileSizes[tile_idx];
-      bsd.TileIndirectDataStartAddress = (frame_info->srcBufferOffset & 4095) +
+      bsd.TileIndirectDataStartAddress = (anv_address_physical(src_addr) & 4095) +
                                          av1_pic_info->pTileOffsets[tile_idx];
    };
 
@@ -3249,9 +3350,11 @@ anv_vp9_decode_video(struct anv_cmd_buffer *cmd_buffer,
 #endif
    }
 
+   struct anv_address src_addr =
+      anv_address_add(src_buffer->address, frame_info->srcBufferOffset);
+
    anv_batch_emit(&cmd_buffer->batch, GENX(HCP_IND_OBJ_BASE_ADDR_STATE), indirect) {
-      indirect.HCPIndirectBitstreamObjectBaseAddress =
-         anv_address_add(src_buffer->address, frame_info->srcBufferOffset & ~4095);
+      indirect.HCPIndirectBitstreamObjectBaseAddress = anv_address_align_down(src_addr, 4096);
 
       indirect.HCPIndirectBitstreamObjectAddressAttributes =
          ANV_VID_ATTR(cmd_buffer->device, src_buffer->address.bo);
@@ -3480,7 +3583,7 @@ anv_vp9_decode_video(struct anv_cmd_buffer *cmd_buffer,
 
    anv_batch_emit(&cmd_buffer->batch, GENX(HCP_BSD_OBJECT), bsd) {
       bsd.IndirectBSDDataLength = frame_info->srcBufferRange - vp9_pic_info->compressedHeaderOffset;
-      bsd.IndirectBSDDataStartAddress = (frame_info->srcBufferOffset & 4095) + vp9_pic_info->compressedHeaderOffset;
+      bsd.IndirectBSDDataStartAddress = (anv_address_physical(src_addr) & 4095) + vp9_pic_info->compressedHeaderOffset;
    }
 
 #if GFX_VER >= 12

@@ -162,6 +162,7 @@ static int parse_reg(const char *str)
 "(ss)"                            return TOKEN(T_SS);
 "(absneg)"                        return TOKEN(T_ABSNEG);
 "(neg)"                           return TOKEN(T_NEG);
+"(not)"                           return TOKEN(T_NOT);
 "(abs)"                           return TOKEN(T_ABS);
 "(r)"                             return TOKEN(T_R);
 "(last)"                          return TOKEN(T_LAST);

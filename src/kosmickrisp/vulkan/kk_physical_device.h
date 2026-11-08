@@ -46,11 +46,14 @@ struct kk_device_info {
    uint32_t rendering_tile_width;
    uint32_t rendering_tile_height;
    VkSampleCountFlags supported_sample_counts;
+   bool supports_bc_texture_compression;
+   bool supports_32_bit_float_filtering;
 };
 
 struct kk_env_settings {
    bool experimental_enabled;
    bool gpu_capture_enabled;
+   bool gpu_capture_immediately;
    const char *gpu_capture_dir;
    uint64_t disabled_workarounds;
 };

@@ -259,6 +259,10 @@ bool evergreen_is_format_supported(struct pipe_screen *screen,
 	if (util_format_get_num_planes(format) > 1)
 		return false;
 
+	/* The byte swap is set up for host-endian formats only. */
+	if (util_format_description(format)->is_byte_swapped)
+		return false;
+
 	if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
 		return false;
 
@@ -4013,6 +4017,7 @@ void evergreen_update_ps_state(struct pipe_context *ctx, struct r600_pipe_shader
 	spi_ps_in_control_1 = 0;
 	if (face_index != -1) {
 		spi_ps_in_control_1 |= S_0286D0_FRONT_FACE_ENA(1) |
+			S_0286D0_FRONT_FACE_ALL_BITS(1) |
 			S_0286D0_FRONT_FACE_ADDR(rshader->input[face_index].gpr);
 	}
 	if (fixed_pt_position_index != -1) {

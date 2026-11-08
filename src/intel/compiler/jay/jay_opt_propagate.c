@@ -171,7 +171,8 @@ propagate_forwards(jay_function *f)
              !def->predication &&
              jay_num_values(def->dst) == 1 &&
              jay_num_values(def->src[0]) == 1 &&
-             I->src[s].file == def->src[0].file) {
+             I->src[s].file == def->src[0].file &&
+             I->src[s].size == def->src[0].size) {
 
             jay_insert_channel(&b, &I->src[s], c, def->src[0]);
          } else if (def->op == JAY_OPCODE_UNDEF && c > 0) {
@@ -370,6 +371,7 @@ propagate_backwards(jay_function *f)
           use->op == JAY_OPCODE_MOV &&
           use->dst.file != J_ADDRESS &&
           jay_num_values(use->dst) == jay_num_values(use->src[0]) &&
+          !(I->op == JAY_OPCODE_SEND && I->dst.file != use->dst.file) &&
           (!jay_is_flag(use->dst) || jay_num_isa_srcs(I) < 3)) {
 
          *(flag ? &I->cond_flag : &I->dst) = use->dst;

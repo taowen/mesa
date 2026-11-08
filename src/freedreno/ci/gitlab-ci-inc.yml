@@ -400,7 +400,7 @@
     RUNNER_TAG: mesa-ci-x86-64-lava-qcom-rb1
     VISIBILITY_GROUP: "mesa-ci"
     LAVA_FIRMWARE: qcom-lava
-    FLASHER_BASE_PATH: s.lava.infra.foundries.io
+    FLASHER_BASE_PATH: qli-prod-artifacts.qualcomm.com/qli-prd-foundri-lava-gh-artifacts/health-check
     FLASHER_IMAGE: rb1/rb1-image-fastboot.tar.gz
     DRIVER_NAME: freedreno-a6xx
     VK_DRIVER: freedreno

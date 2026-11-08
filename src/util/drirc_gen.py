@@ -369,6 +369,9 @@ def add_common_vk_options(debug_options, features_options, misc_options, valid_o
         S("force_vk_devicename", defaults.get("force_vk_devicename", None),
           "Override Vulkan deviceName.",
           c_name="force_vk_devicename"),
+        S("vk_app_layer", defaults.get("vk_app_layer", None),
+          "Select a common application workarounds layer",
+          c_name="vk_app_layer"),
         B("vk_lower_terminate_to_discard", defaults.get("vk_lower_terminate_to_discard", False),
           "Lower terminate to discard (which is implicitly demote)",
           c_name="lower_terminate_to_discard"),
@@ -421,4 +424,6 @@ def add_common_vk_wsi_options(debug_options, performance_options, defaults=None)
           "Disable unordered WSI submits to workaround application synchronization bugs"),
         B("vk_x11_ignore_suboptimal", defaults.get("vk_x11_ignore_suboptimal", False),
           "Force the X11 WSI to never report VK_SUBOPTIMAL_KHR"),
+        B("vk_x11_dedicated_event_connection", defaults.get("vk_x11_dedicated_event_connection", False),
+          "Read X11 Present events on a separate connection to the X server instead of the application's connection"),
     ])

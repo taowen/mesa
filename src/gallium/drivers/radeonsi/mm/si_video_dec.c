@@ -27,6 +27,8 @@ static void si_dec_begin_frame(struct pipe_video_codec *decoder, struct pipe_vid
    if (vid->bs_buffers[vid->cur_buffer]) {
       vid->bs_ptr = vid->ws->buffer_map(vid->ws, vid->bs_buffers[vid->cur_buffer]->buf,
                                         NULL, PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
+      if (!vid->bs_ptr)
+         ERROR("Failed to map bitstream buffer!");
    }
 }
 
@@ -170,7 +172,6 @@ static int si_dec_init_decoder(struct si_video_dec *vid, struct ac_video_dec_ses
       return -EINVAL;
 
    vid->dpb_size = ac_video_dec_dpb_size(&sscreen->info, param);
-   vid->dpb_alignment = ac_video_dec_dpb_alignment(&sscreen->info, param);
 
    if (sscreen->info.ip[vid->dec->ip_type].num_instances > 1) {
       vid->ectx = sscreen->b.context_create(&sscreen->b, NULL, PIPE_CONTEXT_COMPUTE_ONLY);
@@ -242,6 +243,10 @@ static int si_dec_init_decoder(struct si_video_dec *vid, struct ac_video_dec_ses
       cmd.embedded_va = si_dec_buf_address(vid, emb_buffer, RADEON_USAGE_READWRITE, RADEON_DOMAIN_VRAM);
       cmd.embedded_ptr =
          vid->ws->buffer_map(vid->ws, emb_buffer->buf, NULL, PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
+      if (!cmd.embedded_ptr) {
+         ret = -ENOMEM;
+         goto err;
+      }
    }
 
    ret = vid->dec->build_create_cmd(vid->dec, &cmd);
@@ -264,6 +269,10 @@ err_cs:
    if (vid->dec) {
       vid->dec->destroy(vid->dec);
       vid->dec = NULL;
+   }
+   if (vid->ectx) {
+      vid->ectx->destroy(vid->ectx);
+      vid->ectx = NULL;
    }
 
    return ret;
@@ -291,6 +300,8 @@ static int si_dec_destroy_decoder(struct si_video_dec *vid)
       cmd.embedded_va = si_dec_buf_address(vid, emb_buffer, RADEON_USAGE_READWRITE, RADEON_DOMAIN_VRAM);
       cmd.embedded_ptr =
          vid->ws->buffer_map(vid->ws, emb_buffer->buf, NULL, PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
+      if (!cmd.embedded_ptr)
+         return -ENOMEM;
    }
 
    int ret = vid->dec->build_destroy_cmd(vid->dec, &cmd);
@@ -395,6 +406,8 @@ static int decode_cmd_build(struct si_video_dec *vid, struct pipe_picture_desc *
       cmd->embedded_va = si_dec_buf_address(vid, emb_buffer, RADEON_USAGE_READWRITE, RADEON_DOMAIN_VRAM);
       cmd->embedded_ptr =
          vid->ws->buffer_map(vid->ws, emb_buffer->buf, NULL, PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
+      if (!cmd->embedded_ptr)
+         return -ENOMEM;
    }
 
    struct si_resource *bs_buffer = vid->bs_buffers[vid->cur_buffer];
@@ -414,6 +427,10 @@ static int decode_cmd_build(struct si_video_dec *vid, struct pipe_picture_desc *
          si_dec_buf_address(vid, vid->dpb_buffer, RADEON_USAGE_READWRITE, RADEON_DOMAIN_VRAM);
    }
 
+   uint32_t width = vid->base.width;
+   uint32_t height = vid->base.height;
+   ac_video_dec_dpb_extent(&si_screen(vid->screen)->info, &vid->dec->param, &width, &height);
+
    if (cmd->tier == AC_VIDEO_DEC_TIER1) {
       struct si_resource *resize_dpb = NULL;
       if (vid->dec->param.max_width < vid->base.width || vid->dec->param.max_height < vid->base.height) {
@@ -427,8 +444,8 @@ static int decode_cmd_build(struct si_video_dec *vid, struct pipe_picture_desc *
          vid->dpb_buffer = si_resource(vid->screen->resource_create(vid->screen, &(struct pipe_resource){
             .format = dpb_format(vid),
             .target = PIPE_TEXTURE_2D_ARRAY,
-            .width0 = align(vid->base.width, vid->dpb_alignment),
-            .height0 = align(vid->base.height, vid->dpb_alignment),
+            .width0 = width,
+            .height0 = height,
             .depth0 = 1,
             .array_size = vid->dec->param.max_num_ref,
             .usage = PIPE_USAGE_DEFAULT,
@@ -460,9 +477,6 @@ static int decode_cmd_build(struct si_video_dec *vid, struct pipe_picture_desc *
    }
 
    if (cmd->tier == AC_VIDEO_DEC_TIER2) {
-      uint32_t width = align(vid->base.width, vid->dpb_alignment);
-      uint32_t height = align(vid->base.height, vid->dpb_alignment);
-
       cmd->ref_id[cmd->num_refs++] = cmd->cur_id;
 
       for (uint8_t i = 0; i < cmd->num_refs; i++) {

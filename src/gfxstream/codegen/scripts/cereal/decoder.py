@@ -184,13 +184,13 @@ def emit_unmarshal(typeInfo, param, cgen, output = False, destroy = False, noUnb
         lenAccessGuard = cgen.generalLengthAccessGuard(param)
         if None == lenAccess or "1" == lenAccess:
             cgen.stmt("boxed_%s_preserve = %s" % (param.paramName, param.paramName))
-            cgen.stmt("%s = try_unbox_%s(%s)" % (param.paramName, param.typeName, param.paramName))
+            cgen.stmt("%s = try_unbox_%s(Boxed<%s>(%s))" % (param.paramName, param.typeName, param.typeName, param.paramName))
         else:
             if lenAccessGuard is not None:
                 cgen.beginIf(lenAccessGuard)
             cgen.beginFor("uint32_t i = 0", "i < %s" % lenAccess, "++i")
             cgen.stmt("boxed_%s_preserve[i] = %s[i]" % (param.paramName, param.paramName))
-            cgen.stmt("((%s*)(%s))[i] = try_unbox_%s(%s[i])" % (param.typeName, param.paramName, param.typeName, param.paramName))
+            cgen.stmt("((%s*)(%s))[i] = try_unbox_%s(Boxed<%s>(%s[i]))" % (param.typeName, param.paramName, param.typeName, param.typeName, param.paramName))
             cgen.endFor()
             if lenAccessGuard is not None:
                 cgen.endIf()
@@ -228,15 +228,15 @@ def emit_dispatch_unmarshal(typeInfo: VulkanTypeInfo, param: VulkanType, cgen, g
         dynAlloc=True))
 
     if not globalWrapped:
-        cgen.stmt("auto unboxed_%s = unbox_%s(%s)" %
-                  (param.paramName, param.typeName, param.paramName))
-        cgen.stmt("auto vk = dispatch_%s(%s)" %
-                  (param.typeName, param.paramName))
+        cgen.stmt("auto unboxed_%s = unbox_%s(Boxed<%s>(%s))" %
+                  (param.paramName, param.typeName, param.typeName, param.paramName))
+        cgen.stmt("auto vk = dispatch_%s(Boxed<%s>(%s))" %
+                  (param.typeName, param.typeName, param.paramName))
         cgen.stmt("// End manual dispatchable handle unboxing for %s" % param.paramName)
     else:
         # Still need to check dispatcher validity to handle threads with fatal errors
-        cgen.stmt("auto vk = dispatch_%s(%s)" %
-                  (param.typeName, param.paramName))
+        cgen.stmt("auto vk = dispatch_%s(Boxed<%s>(%s))" %
+                  (param.typeName, param.typeName, param.paramName))
 
 
 def emit_transform(typeInfo, param, cgen, variant="tohost"):
@@ -345,17 +345,22 @@ def emit_dispatch_call(api, cgen):
     decodingParams = DecodingParameters(api)
 
     customParams = []
+    capturedParams = []
 
     delay = api.name in DELAYED_DECODER_DELETES
 
     for i, p in enumerate(api.parameters):
+        if delay and p.accessibleAsPointer():
+            customParams.append("nullptr")
+            continue
         customParam = p.paramName
         if decodingParams.params[i].dispatchHandle:
             customParam = "unboxed_%s" % p.paramName
         customParams.append(customParam)
+        capturedParams.append(customParam)
 
     if delay:
-        cgen.line("std::function<void()> delayed_remove_callback = [vk, %s]() {" % ", ".join(customParams))
+        cgen.line("std::function<void()> delayed_remove_callback = [vk, %s]() {" % ", ".join(capturedParams))
 
     if api.name in driver_workarounds_global_lock_apis:
         if delay:
@@ -386,13 +391,15 @@ def emit_dispatch_call(api, cgen):
 def emit_global_state_wrapped_call(api, cgen, context):
     # Delayed deletes will call wrapped call with a callback without pool or snapshot info
     delay = api.name in DELAYED_DECODER_DELETES
-    coreCustomParams = list(map(lambda p: p.paramName, api.parameters))
 
     if delay:
-        cgen.line("std::function<void()> delayed_remove_callback = [vk, %s]() {" % ", ".join(coreCustomParams))
+        capturedParams = [p.paramName for p in api.parameters if not p.accessibleAsPointer()]
+        coreCustomParams = ["nullptr" if p.accessibleAsPointer() else p.paramName for p in api.parameters]
+        cgen.line("std::function<void()> delayed_remove_callback = [vk, %s]() {" % ", ".join(capturedParams))
         cgen.stmt("auto m_state = VkDecoderGlobalState::get()")
         customParams = ["nullptr", "kInvalidSnapshotApiCallHandle"] + coreCustomParams
     else:
+        coreCustomParams = list(map(lambda p: p.paramName, api.parameters))
         customParams = ["&m_pool", SNAPSHOT_API_CALL_HANDLE_VARNAME] + coreCustomParams
 
     if context:
@@ -479,19 +486,19 @@ def emit_destroyed_handle_cleanup(api, cgen):
             if destroy:
                 if None == lenAccess or "1" == lenAccess:
                     if api.name in DELAYED_DECODER_DELETES:
-                        cgen.stmt("delayed_delete_%s(boxed_%s_preserve, unboxed_device, delayed_remove_callback)" % (p.typeName, p.paramName))
+                        cgen.stmt("delayed_delete_%s(Boxed<%s>(boxed_%s_preserve), unboxed_device, delayed_remove_callback)" % (p.typeName, p.typeName, p.paramName))
                     elif api.name in DELAYED_DECODER_DELETE_DICT_ENTRIES:
-                        cgen.stmt("delayed_delete_%s(boxed_%s_preserve, unboxed_device, nullptr)" % (p.typeName, p.paramName))
+                        cgen.stmt("delayed_delete_%s(Boxed<%s>(boxed_%s_preserve), unboxed_device, nullptr)" % (p.typeName, p.typeName, p.paramName))
                     else:
-                        cgen.stmt("delete_%s(boxed_%s_preserve)" % (p.typeName, p.paramName))
+                        cgen.stmt("delete_%s(Boxed<%s>(boxed_%s_preserve))" % (p.typeName, p.typeName, p.paramName))
                 else:
                     if lenAccessGuard is not None:
                         cgen.beginIf(lenAccessGuard)
                     cgen.beginFor("uint32_t i = 0", "i < %s" % lenAccess, "++i")
                     if api.name in DELAYED_DECODER_DELETES:
-                        cgen.stmt("delayed_delete_%s(boxed_%s_preserve[i], unboxed_device, delayed_remove_callback)" % (p.typeName, p.paramName))
+                        cgen.stmt("delayed_delete_%s(Boxed<%s>(boxed_%s_preserve[i]), unboxed_device, delayed_remove_callback)" % (p.typeName, p.typeName, p.paramName))
                     else:
-                        cgen.stmt("delete_%s(boxed_%s_preserve[i])" % (p.typeName, p.paramName))
+                        cgen.stmt("delete_%s(Boxed<%s>(boxed_%s_preserve[i]))" % (p.typeName, p.typeName, p.paramName))
                     cgen.endFor()
                     if lenAccessGuard is not None:
                         cgen.endIf()
@@ -665,7 +672,7 @@ def decode_vkInvalidateMappedMemoryRanges(typeInfo, api, cgen):
 
 def decode_unsupported_api(typeInfo, api, cgen):
     cgen.line(f"// Decoding {api.name} is not supported. This should not run.")
-    cgen.stmt(f"fprintf(stderr, \"stream %p: fatal: decoding unsupported API {api.name}\\n\", ioStream)");
+    cgen.stmt(f"GFXSTREAM_ERROR(\"stream %p: fatal: decoding unsupported API {api.name}\", ioStream)")
     cgen.stmt("__builtin_trap()")
 
 custom_decodes = {
@@ -768,7 +775,11 @@ custom_decodes = {
     "vkAllocateMemory" : emit_global_state_wrapped_decoding,
     "vkFreeMemory" : emit_global_state_wrapped_decoding,
     "vkMapMemory" : emit_global_state_wrapped_decoding,
+    "vkMapMemory2" : emit_global_state_wrapped_decoding,
+    "vkMapMemory2KHR" : emit_global_state_wrapped_decoding,
     "vkUnmapMemory" : emit_global_state_wrapped_decoding,
+    "vkUnmapMemory2" : emit_global_state_wrapped_decoding,
+    "vkUnmapMemory2KHR" : emit_global_state_wrapped_decoding,
     "vkFlushMappedMemoryRanges" : decode_vkFlushMappedMemoryRanges,
     "vkInvalidateMappedMemoryRanges" : decode_vkInvalidateMappedMemoryRanges,
 
@@ -776,6 +787,7 @@ custom_decodes = {
     "vkCmdExecuteCommands" : emit_global_state_wrapped_decoding,
     "vkQueueSubmit" : emit_global_state_wrapped_decoding,
     "vkQueueSubmit2" : emit_global_state_wrapped_decoding,
+    "vkQueueSubmit2KHR" : emit_global_state_wrapped_decoding,
     "vkQueueWaitIdle" : emit_global_state_wrapped_decoding,
     "vkBeginCommandBuffer" : emit_global_state_wrapped_decoding_with_context,
     "vkEndCommandBuffer" : emit_global_state_wrapped_decoding_with_context,
@@ -786,6 +798,7 @@ custom_decodes = {
     "vkResetCommandPool" : emit_global_state_wrapped_decoding,
     "vkCmdPipelineBarrier" : emit_global_state_wrapped_decoding,
     "vkCmdPipelineBarrier2" : emit_global_state_wrapped_decoding,
+    "vkCmdPipelineBarrier2KHR" : emit_global_state_wrapped_decoding,
     "vkCmdWaitEvents" : emit_global_state_wrapped_decoding,
     "vkCmdWaitEvents2" : emit_global_state_wrapped_decoding,
     "vkCmdWaitEvents2KHR" : emit_global_state_wrapped_decoding,
@@ -802,10 +815,11 @@ custom_decodes = {
     "vkDestroyEvent" : emit_global_state_wrapped_decoding,
     "vkSetEvent" : emit_global_state_wrapped_decoding,
     "vkResetEvent" : emit_global_state_wrapped_decoding,
-    "vkDestroyFramebuffer" : emit_global_state_wrapped_decoding,
     "vkCmdBeginRenderPass" : emit_global_state_wrapped_decoding,
     "vkCmdBeginRenderPass2" : emit_global_state_wrapped_decoding,
     "vkCmdBeginRenderPass2KHR" : emit_global_state_wrapped_decoding,
+    "vkCmdBeginRendering" : emit_global_state_wrapped_decoding,
+    "vkCmdBeginRenderingKHR" : emit_global_state_wrapped_decoding,
 
     "vkCreateSamplerYcbcrConversion": emit_global_state_wrapped_decoding,
     "vkDestroySamplerYcbcrConversion": emit_global_state_wrapped_decoding,
@@ -868,8 +882,6 @@ custom_decodes = {
     "vkCollectDescriptorPoolIdsGOOGLE" : emit_global_state_wrapped_decoding,
     "vkQueueSignalReleaseImageANDROIDAsyncGOOGLE" : emit_global_state_wrapped_decoding,
 
-    "vkQueueBindSparse" : emit_global_state_wrapped_decoding,
-
     # VK_KHR_xcb_surface
     "vkCreateXcbSurfaceKHR": decode_unsupported_api,
     "vkGetPhysicalDeviceXcbPresentationSupportKHR": decode_unsupported_api,
@@ -898,6 +910,8 @@ custom_decodes = {
     # Image requirements need to be adjusted for compressed textures
     "vkGetDeviceImageMemoryRequirements" : emit_global_state_wrapped_decoding,
     "vkGetDeviceImageMemoryRequirementsKHR" : emit_global_state_wrapped_decoding,
+    "vkGetDeviceBufferMemoryRequirements" : emit_global_state_wrapped_decoding,
+    "vkGetDeviceBufferMemoryRequirementsKHR" : emit_global_state_wrapped_decoding,
 
     # VK_EXT_private_data
     "vkCreatePrivateDataSlotEXT" : emit_global_state_wrapped_decoding,
@@ -990,7 +1004,8 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
             if (seqnoPtr && !m_forSnapshotLoad) {
                 {
                     while ((seqno - seqnoPtr->load(std::memory_order_seq_cst) != 1)) {
-                        if (shouldExit.load(std::memory_order_relaxed)) {
+                        if (shouldExit.load(std::memory_order_relaxed) ||
+                            (processResources && processResources->isGuestProcessDead())) {
                             GFXSTREAM_WARNING("Process=%s is exitting. Skip processing seqno=%d on thread=0x%x.",
                                  processName ? processName : "null", seqno, gfxstream::base::getCurrentThreadId());
                             return 0;

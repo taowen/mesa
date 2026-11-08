@@ -556,6 +556,17 @@ ethosu_ml_operation_supported(struct pipe_ml_device *pdevice,
    return supported;
 }
 
+static void
+ethosu_ml_operation_free(struct ethosu_operation *operation)
+{
+   free(operation->kernel.scales);
+   free(operation->kernel.zero_points);
+   if (operation->type == ETHOSU_OPERATION_TYPE_CONVOLUTION) {
+      free(operation->conv.weight_data);
+      free(operation->conv.bias_data);
+   }
+}
+
 struct pipe_ml_subgraph *
 ethosu_ml_subgraph_create(struct pipe_ml_device *pdevice,
                           const struct pipe_ml_operation *poperations,
@@ -588,10 +599,8 @@ ethosu_ml_subgraph_create(struct pipe_ml_device *pdevice,
 
    if (subgraph->failed) {
       util_dynarray_foreach (&subgraph->operations,
-                             struct ethosu_operation, operation) {
-         free(operation->kernel.scales);
-         free(operation->kernel.zero_points);
-      }
+                             struct ethosu_operation, operation)
+         ethosu_ml_operation_free(operation);
       util_dynarray_fini(&subgraph->operations);
       free(subgraph->cmd0_state);
       free(subgraph->cmd1_state);
@@ -605,10 +614,8 @@ ethosu_ml_subgraph_create(struct pipe_ml_device *pdevice,
 
    if (subgraph->failed) {
       util_dynarray_foreach (&subgraph->operations,
-                             struct ethosu_operation, operation) {
-         free(operation->kernel.scales);
-         free(operation->kernel.zero_points);
-      }
+                             struct ethosu_operation, operation)
+         ethosu_ml_operation_free(operation);
       util_dynarray_fini(&subgraph->operations);
       free(subgraph->cmd0_state);
       free(subgraph->cmd1_state);
@@ -618,16 +625,22 @@ ethosu_ml_subgraph_create(struct pipe_ml_device *pdevice,
       return NULL;
    }
 
-   util_dynarray_foreach (&subgraph->operations, struct ethosu_operation, operation) {
-      free(operation->kernel.scales);
-      free(operation->kernel.zero_points);
-   }
+   util_dynarray_foreach (&subgraph->operations, struct ethosu_operation, operation)
+      ethosu_ml_operation_free(operation);
    util_dynarray_fini(&subgraph->operations);
 
    free(subgraph->cmd0_state);
    free(subgraph->cmd1_state);
    free(subgraph->cmd0_valid);
    free(subgraph->cmd1_valid);
+
+   if (DBG_ENABLED(ETHOSU_DBG_DUMP_BOS)) {
+      uint64_t cmdstream_size = (subgraph->cursor - subgraph->cmdstream) *
+      sizeof(*subgraph->cursor);
+
+      ethosu_dump_buffer((uint8_t *)subgraph->cmdstream, "cmdstream", 0, 0, 0,
+                         cmdstream_size);
+   }
 
    return &subgraph->base;
 }
@@ -643,6 +656,7 @@ ethosu_ml_subgraph_serialize(struct pipe_ml_device *pdevice,
       struct ethosu_tensor) * NUM_TENSOR_FIELDS * sizeof(uint32_t);
    uint64_t cmdstream_size = (subgraph->cursor - subgraph->cmdstream) *
       sizeof(*subgraph->cursor);
+
    uint64_t coefs_size = subgraph->coefs_used * sizeof(*subgraph->coefs);
    uint64_t io_size = subgraph->io_used;
    uint64_t total_size = header_size + cmdstream_size + coefs_size +
@@ -690,10 +704,6 @@ prepare_for_submission(struct ethosu_subgraph *subgraph,
    struct ethosu_screen *screen = subgraph->screen;
    uint64_t cmdstream_size = (subgraph->cursor - subgraph->cmdstream) *
       sizeof(*subgraph->cursor);
-
-   if (DBG_ENABLED(ETHOSU_DBG_DUMP_BOS))
-      ethosu_dump_buffer((uint8_t *)subgraph->cmdstream, "cmdstream", 0, 0, 0,
-                         cmdstream_size);
 
    if (cmdstream_size) {
       struct drm_ethosu_cmdstream_bo_create cmd_bo_create = {

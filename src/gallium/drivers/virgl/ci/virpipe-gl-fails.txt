@@ -210,8 +210,6 @@ spec@arb_occlusion_query@occlusion_query_conform,Fail
 spec@arb_occlusion_query@occlusion_query_meta_no_fragments,Fail
 spec@arb_occlusion_query@occlusion_query_meta_save,Fail
 spec@arb_point_sprite@arb_point_sprite-mipmap,Fail
-spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex,Fail
-spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex@'vs_input2[1][0]' on GL_PROGRAM_INPUT,Fail
 
 spec@arb_sample_shading@builtin-gl-sample-position 2,Fail
 
@@ -554,8 +552,6 @@ spec@ext_texture_srgb@texwrap formats-s3tc bordercolor@GL_COMPRESSED_SRGB_ALPHA_
 spec@ext_texture_srgb@texwrap formats-s3tc bordercolor@GL_COMPRESSED_SRGB_S3TC_DXT1_EXT- border color only,Fail
 spec@!opengl 1.1@depthstencil-default_fb-drawpixels-24_8 samples=6,Fail
 spec@ext_framebuffer_multisample@interpolation 8 centroid-edges,Fail
-spec@glsl-1.30@execution@glsl-packed-back-color,Fail
-spec@!opengl 1.1@large-tex,Crash
 spec@arb_texture_rectangle@copyteximage rect samples=8,Fail
 
 # New failures with GL CTS 4.6.6.0 & ES CTS 3.2.12.0

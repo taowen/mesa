@@ -3074,72 +3074,6 @@ strip_texture_border(GLenum target,
    }
 }
 
-static struct gl_texture_object *
-lookup_texture_ext_dsa(struct gl_context *ctx, GLenum target, GLuint texture,
-                       const char *caller)
-{
-   GLenum boundTarget;
-   switch (target) {
-   case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
-   case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
-   case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
-   case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
-   case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
-   case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
-      boundTarget = GL_TEXTURE_CUBE_MAP;
-      break;
-   default:
-      boundTarget = target;
-      break;
-   }
-
-   int targetIndex = _mesa_tex_target_to_index(ctx, boundTarget);
-   if (targetIndex < 0) {
-      _mesa_error(ctx, GL_INVALID_ENUM, "%s(target = %s)", caller,
-                  _mesa_enum_to_string(target));
-            return NULL;
-   }
-   assert(targetIndex < NUM_TEXTURE_TARGETS);
-
-   struct gl_texture_object *texObj;
-   if (texture == 0) {
-      /* Use a default texture object */
-      texObj = ctx->Shared->DefaultTex[targetIndex];
-      assert(texObj);
-   } else {
-      _mesa_HashLockMutex(&ctx->Shared->TexObjects);
-
-      texObj = _mesa_lookup_texture_locked(ctx, texture);
-      if (!texObj && _mesa_is_desktop_gl_core(ctx)) {
-         _mesa_error(ctx, GL_INVALID_OPERATION, "%s(non-gen name)", caller);
-         _mesa_HashUnlockMutex(&ctx->Shared->TexObjects);
-         return NULL;
-      }
-
-      if (!texObj) {
-         texObj = _mesa_new_texture_object(ctx, texture, boundTarget);
-         if (!texObj) {
-            _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s", caller);
-            _mesa_HashUnlockMutex(&ctx->Shared->TexObjects);
-            return NULL;
-         }
-
-         /* insert into hash table */
-         _mesa_HashInsertLocked(&ctx->Shared->TexObjects, texObj->Name, texObj);
-      }
-      _mesa_HashUnlockMutex(&ctx->Shared->TexObjects);
-
-      if (texObj->Target != boundTarget) {
-         _mesa_error(ctx, GL_INVALID_OPERATION, "%s(%s != %s)",
-                     caller, _mesa_enum_to_string(texObj->Target),
-                     _mesa_enum_to_string(target));
-         return NULL;
-      }
-   }
-
-   return texObj;
-}
-
 /**
  * Common code to implement all the glTexImage1D/2D/3D functions,
  * glCompressedTexImage1D/2D/3D and glTextureImage1D/2D/3DEXT
@@ -3927,7 +3861,8 @@ texturesubimage(struct gl_context *ctx, GLuint dims,
       if (!ext_dsa) {
          texObj = _mesa_lookup_texture_err(ctx, texture, callerName);
       } else {
-         texObj = lookup_texture_ext_dsa(ctx, target, texture, callerName);
+         texObj = _mesa_lookup_or_create_texture(ctx, target, texture, false,
+                                                 true, callerName);
       }
       if (!texObj)
          return;
@@ -6465,7 +6400,7 @@ _mesa_get_texbuffer_format(const struct gl_context *ctx, GLenum internalFormat)
 
    switch (internalFormat) {
    case GL_RGBA8:
-      return MESA_FORMAT_R8G8B8A8_UNORM;
+      return MESA_FORMAT_RGBA_UNORM8;
    case GL_RGBA16:
       if (_mesa_is_gles(ctx) && !_mesa_has_EXT_texture_norm16(ctx))
          return MESA_FORMAT_NONE;
@@ -7324,8 +7259,8 @@ _mesa_TextureStorage2DMultisampleEXT(GLuint texture, GLenum target, GLsizei samp
    struct gl_texture_object *texObj;
    GET_CURRENT_CONTEXT(ctx);
 
-   texObj = lookup_texture_ext_dsa(ctx, target, texture,
-                                   "glTextureStorage2DMultisampleEXT");
+   texObj = _mesa_lookup_or_create_texture(ctx, target, texture, false, true,
+                                           "glTextureStorage2DMultisampleEXT");
    if (!texObj)
       return;
 
@@ -7347,8 +7282,8 @@ _mesa_TextureStorage3DMultisampleEXT(GLuint texture, GLenum target, GLsizei samp
    struct gl_texture_object *texObj;
    GET_CURRENT_CONTEXT(ctx);
 
-   texObj = lookup_texture_ext_dsa(ctx, target, texture,
-                                   "glTextureStorage3DMultisampleEXT");
+   texObj = _mesa_lookup_or_create_texture(ctx, target, texture, false, true,
+                                           "glTextureStorage3DMultisampleEXT");
    if (!texObj)
       return;
 

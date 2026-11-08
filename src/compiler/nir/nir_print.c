@@ -812,8 +812,10 @@ get_variable_mode_str(nir_variable_mode mode, bool want_local_global_mode)
       return want_local_global_mode ? "shader_temp" : "";
    case nir_var_function_temp:
       return want_local_global_mode ? "function_temp" : "";
-   case nir_var_shader_call_data:
-      return "shader_call_data";
+   case nir_var_shader_call_data_in:
+      return "shader_call_data_in";
+   case nir_var_shader_call_data_out:
+      return "shader_call_data_out";
    case nir_var_ray_hit_attrib:
       return "ray_hit_attrib";
    case nir_var_mem_task_payload:
@@ -914,6 +916,7 @@ print_access(enum gl_access_qualifier access, print_state *state, const char *se
       { ACCESS_SPARSE, "sparse" },
       { ACCESS_ISTREAM_PAN, "istream-pan" },
       { ACCESS_ESTREAM_PAN, "estream-pan" },
+      { ACCESS_IS_SPECULATED, "is-speculated" },
    };
 
    bool first = true;
@@ -2020,6 +2023,9 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
    case nir_texop_sample_pos_nv:
       fprintf(fp, "sample_pos_nv ");
       break;
+   case nir_texop_dual_pan:
+      fprintf(fp, "dual_pan ");
+      break;
    case nir_texop_gradient_pan:
       fprintf(fp, "gradient_pan ");
       break;
@@ -2035,6 +2041,9 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
    case nir_texop_block_match_ssd_qcom:
       fprintf(fp, "block_match_ssd_qcom ");
       break;
+   case nir_texop_txs_lod0_intel:
+      fprintf(fp, "txs_lod0_intel ");
+      break;
    case nir_texop_resinfo_intel:
       fprintf(fp, "resinfo_intel ");
       break;
@@ -2049,7 +2058,8 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
       break;
    }
 
-   bool has_texture_deref = false, has_sampler_deref = false;
+   bool has_texture_deref = false, has_sampler_deref = false,
+        has_sampler_2_deref = false;
    for (unsigned i = 0; i < instr->num_srcs; i++) {
       if (i > 0) {
          fprintf(fp, ", ");
@@ -2127,6 +2137,7 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
          fprintf(fp, "(sampler_deref)");
          break;
       case nir_tex_src_sampler_2_deref:
+         has_sampler_2_deref = true;
          fprintf(fp, "(sampler_2_deref)");
          break;
       case nir_tex_src_texture_offset:
@@ -2156,11 +2167,23 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
       case nir_tex_src_texture_heap_offset:
          fprintf(fp, "(texture_heap_offset)");
          break;
+      case nir_tex_src_texture_2_heap_offset:
+         fprintf(fp, "(texture_2_heap_offset)");
+         break;
       case nir_tex_src_sampler_heap_offset:
          fprintf(fp, "(sampler_heap_offset)");
          break;
+      case nir_tex_src_sampler_2_heap_offset:
+         fprintf(fp, "(sampler_2_heap_offset)");
+         break;
       case nir_tex_src_plane:
          fprintf(fp, "(plane)");
+         break;
+      case nir_tex_src_var_handle_pan:
+         fprintf(fp, "(var_handle_pan)");
+         break;
+      case nir_tex_src_var_buf_offset_pan:
+         fprintf(fp, "(var_buf_offset_pan)");
          break;
 
       default:
@@ -2184,12 +2207,30 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
       fprintf(fp, " } (offsets)");
    }
 
-   if (instr->op != nir_texop_txf_ms_fb && !has_texture_deref) {
+   if (instr->op != nir_texop_txf_ms_fb &&
+       (!has_texture_deref || instr->input_attachment_index)) {
       fprintf(fp, ", %u (texture)", instr->texture_index);
+   }
+
+   if (instr->input_attachment_index) {
+      fprintf(fp, ", %u (texture array size), input attachment",
+              instr->texture_array_size);
+   }
+
+   if (instr->input_attachment_depth) {
+      fprintf(fp, ", input attachment depth");
+   }
+
+   if (instr->input_attachment_stencil) {
+      fprintf(fp, ", input attachment stencil");
    }
 
    if (nir_tex_instr_need_sampler(instr) && !has_sampler_deref) {
       fprintf(fp, ", %u (sampler)", instr->sampler_index);
+   }
+
+   if (nir_tex_instr_need_texture_2(instr) && !has_sampler_2_deref) {
+      fprintf(fp, ", %u (sampler_2)", instr->sampler_2_index);
    }
 
    if (instr->texture_non_uniform) {
@@ -3102,6 +3143,14 @@ print_shader_info(const struct shader_info *info, FILE *fp)
       print_nz_bool(fp, "nv", info->mesh.nv);
       break;
 
+   case MESA_SHADER_RAYGEN:
+   case MESA_SHADER_ANY_HIT:
+   case MESA_SHADER_CLOSEST_HIT:
+   case MESA_SHADER_MISS:
+   case MESA_SHADER_INTERSECTION:
+   case MESA_SHADER_CALLABLE:
+      break;
+
    default:
       fprintf(fp, "Unhandled stage %d\n", info->stage);
    }
@@ -3194,13 +3243,19 @@ nir_print_shader_annotated(nir_shader *shader, FILE *fp,
 }
 
 void
+nir_print_shader_dbg(nir_shader *shader, FILE *fp)
+{
+   nir_print_shader_annotated(shader, fp, NULL);
+   fflush(fp);
+}
+
+void
 nir_print_shader(nir_shader *shader, FILE *fp)
 {
    nir_foreach_function_impl(impl, shader) {
       nir_index_ssa_defs(impl);
    }
-   nir_print_shader_annotated(shader, fp, NULL);
-   fflush(fp);
+   nir_print_shader_dbg(shader, fp);
 }
 
 static char *

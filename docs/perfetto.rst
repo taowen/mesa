@@ -9,6 +9,7 @@ data-sources for things like:
 
 - CPU scheduling events (``linux.ftrace``)
 - CPU frequency scaling (``linux.ftrace``)
+- DRM scheduler events (``linux.ftrace``)
 - System calls (``linux.ftrace``)
 - Process memory utilization (``linux.process_stats``)
 
@@ -51,7 +52,7 @@ The exact supported features vary per driver:
      -
    * - V3DV
      - ``gpu.counters.v3d``
-     - ``gpu.renderstages.broadcom``
+     -
 
 Run
 ---
@@ -148,6 +149,27 @@ before starting a Vulkan application :
 
    MESA_GPU_TRACES=perfetto ./build/my_vulkan_app
 
+DRM scheduler events
+~~~~~~~~~~~~~~~~~~~~
+
+Kernel drivers that use the DRM GPU scheduler (``amdgpu``, ``etnaviv``,
+``lima``, ``msm``, ``nouveau``, ``panfrost``, ``panthor``, ``powervr``,
+``v3d`` and ``xe``) emit ``gpu_scheduler`` ftrace events that follow each job
+from its submission to its completion. These events are described in the DRM's
+`stable uAPI events <https://docs.kernel.org/gpu/drm-uapi.html#stable-uapi-events>`__.
+
+Perfetto shows one ``sched-<ring>`` track per hardware ring (e.g.
+``sched-v3d_render``), with a ``job`` slice for each job executed on the ring.
+Each of them is linked by a flow to the ``drm_sched_job_queue`` slice on the
+thread that submitted the job, which allows job slices to be related to Mesa's
+CPU tracepoints.
+
+All of the events identify the job by the context and seqno of its scheduler
+fence, which also allows matching them with the ``dma_fence`` events.
+
+These events can be used by developers to identify performance bottlenecks in
+between user space and kernel space.
+
 Driver Specifics
 ~~~~~~~~~~~~~~~~
 
@@ -225,8 +247,7 @@ V3D / V3DV
 
 As we can only have one performance monitor active at a given time, we can only monitor
 32 performance counters. There is a need to define the performance counters of interest
-for pps_producer using the environment variable ``V3D_DS_COUNTER``. This is not required
-for render-stage tracing, as pps_producer is not essential to it.
+for pps_producer using the environment variable ``V3D_DS_COUNTER``.
 
 .. code-block:: sh
 

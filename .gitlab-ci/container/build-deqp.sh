@@ -24,7 +24,7 @@ set -x
 # - the GLES release produces `deqp-gles*` and `deqp-egl`
 
 DEQP_MAIN_COMMIT=634a3fc62d82c34de68c3b1add25e6b7f5777524
-DEQP_VK_VERSION=1.4.6.2
+DEQP_VK_VERSION=1.4.7.0
 DEQP_GL_VERSION=4.6.8.1
 DEQP_GLES_VERSION=3.2.14.1
 
@@ -48,14 +48,8 @@ main_cts_patch_files=(
 
 # shellcheck disable=SC2034
 vk_cts_commits_to_backport=(
-  # android: Implement headless WSI fallback using AImageReader
-  6368ee8503dd9ca46eabfa2df293075d9034a214
-  # Check requirements in checkSupport, part 11 (binding_model module)
-  541ed0874565d642069c59fe3b31fc42f495a470
-  # Use -frounding-math by default with GCC
-  ded32883bf36e5bdf7ac6b0512d5314adc0849d4
-  # Check requirements in checkSupport, part 12 (conditional_rendering module)
-  b1a2490aaa2cc0429dca4f8efcce7e0d4a9e619f
+  # Add default Platform constructor and restore createPlatform() for Android
+  c60ca01d5bd437e610c9bf20c732fe0e923d3d43
 )
 
 # shellcheck disable=SC2034
@@ -74,6 +68,10 @@ gl_cts_commits_to_backport=(
   bf307df9e5c6c27499c2c799409d17554d39cafc
   # Fix a memory leak with the texture image sample tests
   5d392ccf4fa09d38d06ca66875a2aaac4fde2b11
+  # Update the SHA of gl.xml for GL_map_buffer_client_pointer desktop OpenGL support
+  14906370e647d1a5ad584b800052a46cf4df04ca
+  # Add valid GL_MAP_CLIENT_POINTER_BIT_MESA bit to storageFlags.
+  ae0462f96eb56c295b98372d1780c8608c4970ad
 )
 
 # shellcheck disable=SC2034

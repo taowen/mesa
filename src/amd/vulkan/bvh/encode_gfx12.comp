@@ -78,7 +78,7 @@ encode_gfx12(uint32_t ir_leaf_node_size, REF(vk_ir_box_node) intermediate_intern
          bool is_valid_internal = child != RADV_BVH_INVALID_NODE && ir_id_to_type(child) == vk_ir_node_internal;
          if (is_valid_internal) {
             vk_aabb child_aabb = DEREF(REF(vk_ir_node) OFFSET(args.intermediate_bvh, ir_id_to_offset(child))).aabb;
-            surface_area = aabb_surface_area(child_aabb);
+            surface_area = aabb_half_surface_area(child_aabb);
          }
 
          float max_surface_area = subgroupClusteredMax(surface_area, 8);

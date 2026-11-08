@@ -149,15 +149,15 @@ brw_shader::emit_cs_terminate()
 
 brw_shader::brw_shader(const brw_shader_params *params)
    : compiler(params->compiler),
-     log_data(params->log_data),
+     compile_params(params->compile_params),
      devinfo(params->compiler->devinfo),
      nir(params->nir),
-     mem_ctx(params->mem_ctx),
+     mem_ctx(params->compile_params->mem_ctx),
      cfg(NULL),
      stage(params->nir->info.stage),
      debug_enabled(params->debug_enabled),
-     key(params->key),
-     prog_data(params->prog_data),
+     key(params->compile_params->key),
+     prog_data(params->compile_params->prog_data),
      live_analysis(this),
      regpressure_analysis(this),
      performance_analysis(this),
@@ -167,8 +167,7 @@ brw_shader::brw_shader(const brw_shader_params *params)
      needs_register_pressure(params->needs_register_pressure),
      dispatch_width(params->dispatch_width),
      max_polygons(params->num_polygons),
-     api_subgroup_size(brw_nir_api_subgroup_size(params->nir, dispatch_width)),
-     archiver(params->archiver)
+     api_subgroup_size(brw_nir_api_subgroup_size(params->nir, dispatch_width))
 {
    assert(api_subgroup_size == 0 ||
          api_subgroup_size == 8 ||
@@ -589,7 +588,7 @@ brw_shader::debug_optimizer(const nir_shader *nir,
                             const char *pass_name,
                             int iteration, int pass_num) const
 {
-   if (!archiver)
+   if (!compile_params->archiver)
       return;
 
    /* TODO: Add replacement for INTEL_SHADER_OPTIMIZER_PATH. */
@@ -598,9 +597,9 @@ brw_shader::debug_optimizer(const nir_shader *nir,
                       dispatch_width,
                       iteration, pass_num, pass_name);
 
-   FILE *f = debug_archiver_start_file(archiver, filename);
+   FILE *f = debug_archiver_start_file(compile_params->archiver, filename);
    brw_print_instructions(*this, f);
-   debug_archiver_finish_file(archiver);
+   debug_archiver_finish_file(compile_params->archiver);
 }
 
 static uint32_t
@@ -868,7 +867,7 @@ brw_allocate_registers(brw_shader &s, bool allow_spilling)
       s.fail("Failure to register allocate.  Reduce number of "
            "live scalar values to avoid this.");
    } else if (s.spilled_any_registers) {
-      brw_shader_perf_log(s.compiler, s.log_data,
+      brw_shader_perf_log(s.compiler, s.compile_params->log_data,
                           "%s shader triggered register spilling.  "
                           "Try reducing the number of live scalar "
                           "values to improve performance.\n",
@@ -889,7 +888,7 @@ brw_allocate_registers(brw_shader &s, bool allow_spilling)
 
    s.debug_optimizer(nir, "post_ra_alloc", iteration, pass_num);
 
-   if (s.spilled_any_registers) {
+   if (s.spilled_any_registers && devinfo->has_lsc) {
       if (!INTEL_DEBUG(DEBUG_NO_FILL_OPT))
          OPT(brw_opt_fill_and_spill);
 
@@ -1004,7 +1003,7 @@ brw_cs_get_dispatch_info(const struct intel_device_info *devinfo,
                             prog_data->local_size;
 
    int simd = -1;
-   if (intel_use_jay(devinfo, prog_data->base.stage)) {
+   if (prog_data->base.is_jay) {
       /* Currently Jay compiles only a single binary, just select that. In the
        * future this needs to get smarter.
        */
@@ -1089,29 +1088,29 @@ brw_compile(const struct brw_compiler *compiler,
 
    switch (params->nir->info.stage) {
    case MESA_SHADER_VERTEX:
-      return brw_compile_vs(compiler, (struct brw_compile_vs_params *)params);
+      return brw_compile_vs(compiler, params);
    case MESA_SHADER_TESS_CTRL:
-      return brw_compile_tcs(compiler, (struct brw_compile_tcs_params *)params);
+      return brw_compile_tcs(compiler, params);
    case MESA_SHADER_TESS_EVAL:
-      return brw_compile_tes(compiler, (struct brw_compile_tes_params *)params);
+      return brw_compile_tes(compiler, params);
    case MESA_SHADER_GEOMETRY:
-      return brw_compile_gs(compiler, (struct brw_compile_gs_params *)params);
+      return brw_compile_gs(compiler, params);
    case MESA_SHADER_TASK:
-      return brw_compile_task(compiler, (struct brw_compile_task_params *)params);
+      return brw_compile_task(compiler, params);
    case MESA_SHADER_MESH:
-      return brw_compile_mesh(compiler, (struct brw_compile_mesh_params *)params);
+      return brw_compile_mesh(compiler, params);
    case MESA_SHADER_FRAGMENT:
-      return brw_compile_fs(compiler, (struct brw_compile_fs_params *)params);
+      return brw_compile_fs(compiler, params);
    case MESA_SHADER_COMPUTE:
    case MESA_SHADER_KERNEL:
-      return brw_compile_cs(compiler, (struct brw_compile_cs_params *)params);
+      return brw_compile_cs(compiler, params);
    case MESA_SHADER_RAYGEN:
    case MESA_SHADER_ANY_HIT:
    case MESA_SHADER_CLOSEST_HIT:
    case MESA_SHADER_MISS:
    case MESA_SHADER_INTERSECTION:
    case MESA_SHADER_CALLABLE:
-      return brw_compile_bs(compiler, (struct brw_compile_bs_params *)params);
+      return brw_compile_bs(compiler, params);
    default:
       UNREACHABLE("Unsupported shader stage");
       return NULL;
@@ -1128,4 +1127,23 @@ void brw_prog_data_init(struct brw_stage_prog_data *prog_data,
    prog_data->stage = params->nir->info.stage;
    prog_data->total_scratch = 0;
    prog_data->total_shared = params->nir->info.shared_size;
+}
+
+brw_reg
+brw_get_scratch64_surface_state_addr(brw_shader *shader)
+{
+   assert(shader->key->use_efficient_64bit);
+
+   if (shader->scratch64_surface.file != BAD_FILE)
+      return shader->scratch64_surface;
+
+   brw_builder ubld = brw_builder(shader).at_shader_start().exec_all().group(1, 0);
+
+   ubld.emit(SHADER_OPCODE_MOV_RELOC_IMM, brw_s0(BRW_TYPE_UD, 14),
+             brw_imm_ud(BRW_SHADER_RELOC_SCRATCH64_SURFACE_LOW), brw_imm_ud(0));
+   ubld.emit(SHADER_OPCODE_MOV_RELOC_IMM, brw_s0(BRW_TYPE_UD, 15),
+             brw_imm_ud(BRW_SHADER_RELOC_SCRATCH64_SURFACE_HIGH), brw_imm_ud(0));
+
+   shader->scratch64_surface = brw_s0(BRW_TYPE_UQ, 7);
+   return shader->scratch64_surface;
 }
