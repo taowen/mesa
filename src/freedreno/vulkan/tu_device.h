@@ -121,6 +121,9 @@ struct tu_physical_device
    uint32_t usable_gmem_size_gmem;
    struct fd6_gmem_config config_gmem, config_sysmem;
 
+   /* Use regular 2D/3D attachment transfers instead of GMEM blit events. */
+   bool avoid_gmem_blit_events;
+
    uint64_t uche_trap_base;
 
    /* Amount of usable descriptor sets, this excludes any reserved set */

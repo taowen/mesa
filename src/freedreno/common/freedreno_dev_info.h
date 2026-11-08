@@ -107,6 +107,8 @@ struct fd_dev_info {
 
       /* info for setting RB_CCU_CNTL */
       bool concurrent_resolve;
+      /* GMEM blit events can corrupt attachments on KGSL. */
+      bool kgsl_gmem_event_blit_quirk;
       bool has_z24uint_s8uint;
 
       /* on a650, vertex shader <-> tess control io uses LDL/STL */

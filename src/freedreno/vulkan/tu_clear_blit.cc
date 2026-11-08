@@ -5938,6 +5938,7 @@ tu_load_gmem_attachment(struct tu_cmd_buffer *cmd,
       tu_begin_load_store_cond_exec(cmd, cs, true);
 
    if (TU_DEBUG(3D_LOAD) ||
+       cmd->device->physical_device->avoid_gmem_blit_events ||
        cmd->state.pass->has_fdm ||
        /* Replicating unresolve seems to not work and the blob never uses it.
         */
@@ -6193,7 +6194,9 @@ tu_choose_gmem_layout(struct tu_cmd_buffer *cmd)
 {
    cmd->state.gmem_layout = TU_GMEM_LAYOUT_FULL;
 
-   if (cmd->state.pass->has_fdm)
+   /* Fallback stores need CCU space separate from the attachment tiles. */
+   if (cmd->state.pass->has_fdm ||
+       cmd->device->physical_device->avoid_gmem_blit_events)
       cmd->state.gmem_layout = TU_GMEM_LAYOUT_AVOID_CCU;
 
    for (unsigned i = 0; i < cmd->state.pass->attachment_count; i++) {
@@ -6390,7 +6393,8 @@ tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
    bool store_common = dst->store && !resolve_d32s8_s8;
    bool store_separate_stencil = dst->store_stencil || resolve_d32s8_s8;
 
-   bool use_fast_path = !unaligned && !mismatched_mutability &&
+   bool use_fast_path = !cmd->device->physical_device->avoid_gmem_blit_events &&
+                        !unaligned && !mismatched_mutability &&
                         !resolve_d24s8_s8 &&
                         (a == gmem_a || blit_can_resolve(dst->format)) &&
                         (!cmd->state.pass->has_fdm || CHIP >= A7XX);
