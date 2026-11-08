@@ -194,7 +194,6 @@ struct fd_dev_info {
        */
       bool has_per_view_viewport;
       bool has_gmem_fast_clear;
-      bool disable_gmem;
 
       /* Per CCU GMEM amount reserved for color cache used by GMEM resolves
        * which require color cache (non-BLIT event case).
