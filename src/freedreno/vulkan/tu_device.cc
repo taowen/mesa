@@ -1724,8 +1724,8 @@ tu_physical_device_init(struct tu_physical_device *device,
    const struct fd_dev_info info = fd_dev_info(&device->dev_id);
    assert(info.chip);
 
-   device->avoid_gmem_blit_events =
-      info.props.kgsl_gmem_event_blit_quirk && is_kgsl(instance);
+   device->disable_gmem =
+      info.props.kgsl_gmem_corruption_quirk && is_kgsl(instance);
 
    /* Print a suffix if raytracing is disabled by the SW fuse, in an attempt
     * to avoid confusion when apps don't work.

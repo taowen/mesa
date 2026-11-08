@@ -1420,6 +1420,11 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
                      tu_autotune::rp_ctx_t *rp_ctx,
                      tu_autotune::rp_key_opt rp_key)
 {
+   if (cmd->device->physical_device->disable_gmem) {
+      cmd->state.rp.force_render_mode_reason = "KGSL GMEM corruption workaround";
+      return true;
+   }
+
    if (TU_DEBUG(SYSMEM)) {
       cmd->state.rp.force_render_mode_reason = "TU_DEBUG(SYSMEM)";
       return true;

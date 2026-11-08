@@ -5938,7 +5938,6 @@ tu_load_gmem_attachment(struct tu_cmd_buffer *cmd,
       tu_begin_load_store_cond_exec(cmd, cs, true);
 
    if (TU_DEBUG(3D_LOAD) ||
-       cmd->device->physical_device->avoid_gmem_blit_events ||
        cmd->state.pass->has_fdm ||
        /* Replicating unresolve seems to not work and the blob never uses it.
         */
@@ -6203,10 +6202,8 @@ tu_choose_gmem_layout(struct tu_cmd_buffer *cmd)
 
       struct tu_render_pass_attachment *att =
          &cmd->state.pass->attachments[i];
-      /* Fallback stores need CCU space separate from the attachment tiles. */
       if ((att->store || att->store_stencil) &&
-          (cmd->device->physical_device->avoid_gmem_blit_events ||
-           tu_attachment_store_unaligned(cmd, i)))
+          tu_attachment_store_unaligned(cmd, i))
          cmd->state.gmem_layout = TU_GMEM_LAYOUT_AVOID_CCU;
       if (att->store && att->format == VK_FORMAT_S8_UINT)
          /* We cannot pick out S8 from D24S8/D32S8, so we conservatively disable
@@ -6393,8 +6390,7 @@ tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
    bool store_common = dst->store && !resolve_d32s8_s8;
    bool store_separate_stencil = dst->store_stencil || resolve_d32s8_s8;
 
-   bool use_fast_path = !cmd->device->physical_device->avoid_gmem_blit_events &&
-                        !unaligned && !mismatched_mutability &&
+   bool use_fast_path = !unaligned && !mismatched_mutability &&
                         !resolve_d24s8_s8 &&
                         (a == gmem_a || blit_can_resolve(dst->format)) &&
                         (!cmd->state.pass->has_fdm || CHIP >= A7XX);
