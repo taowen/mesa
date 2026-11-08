@@ -1421,6 +1421,11 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
       return true;
    }
 
+   if (cmd->device->physical_device->info->props.disable_gmem) {
+      cmd->state.rp.force_render_mode_reason = "GMEM is disabled for this device";
+      return true;
+   }
+
    /* can't fit attachments into gmem */
    if (!cmd->state.tiling->possible) {
       cmd->state.rp.force_render_mode_reason = "Can't fit attachments into gmem";
