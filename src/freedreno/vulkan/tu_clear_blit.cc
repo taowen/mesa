@@ -6194,9 +6194,7 @@ tu_choose_gmem_layout(struct tu_cmd_buffer *cmd)
 {
    cmd->state.gmem_layout = TU_GMEM_LAYOUT_FULL;
 
-   /* Fallback stores need CCU space separate from the attachment tiles. */
-   if (cmd->state.pass->has_fdm ||
-       cmd->device->physical_device->avoid_gmem_blit_events)
+   if (cmd->state.pass->has_fdm)
       cmd->state.gmem_layout = TU_GMEM_LAYOUT_AVOID_CCU;
 
    for (unsigned i = 0; i < cmd->state.pass->attachment_count; i++) {
@@ -6205,8 +6203,10 @@ tu_choose_gmem_layout(struct tu_cmd_buffer *cmd)
 
       struct tu_render_pass_attachment *att =
          &cmd->state.pass->attachments[i];
+      /* Fallback stores need CCU space separate from the attachment tiles. */
       if ((att->store || att->store_stencil) &&
-          tu_attachment_store_unaligned(cmd, i))
+          (cmd->device->physical_device->avoid_gmem_blit_events ||
+           tu_attachment_store_unaligned(cmd, i)))
          cmd->state.gmem_layout = TU_GMEM_LAYOUT_AVOID_CCU;
       if (att->store && att->format == VK_FORMAT_S8_UINT)
          /* We cannot pick out S8 from D24S8/D32S8, so we conservatively disable
