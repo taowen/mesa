@@ -121,9 +121,6 @@ struct tu_physical_device
    uint32_t usable_gmem_size_gmem;
    struct fd6_gmem_config config_gmem, config_sysmem;
 
-   /* Render directly to system memory when GMEM is unreliable. */
-   bool disable_gmem;
-
    uint64_t uche_trap_base;
 
    /* Amount of usable descriptor sets, this excludes any reserved set */

@@ -107,8 +107,6 @@ struct fd_dev_info {
 
       /* info for setting RB_CCU_CNTL */
       bool concurrent_resolve;
-      /* GMEM rendering can corrupt image data on KGSL. */
-      bool kgsl_gmem_corruption_quirk;
       bool has_z24uint_s8uint;
 
       /* on a650, vertex shader <-> tess control io uses LDL/STL */
