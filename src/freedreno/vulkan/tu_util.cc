@@ -129,8 +129,11 @@ tu_env_deinit(void)
 static void
 tu_env_init_once(void)
 {
-   tu_env.start_debug = tu_env.debug = TU_DEBUG_SYSMEM |
-      parse_debug_string(os_get_option("TU_DEBUG"), tu_debug_options);
+   uint64_t flags = parse_debug_string(os_get_option("TU_DEBUG"), tu_debug_options);
+#ifdef TU_FORCE_SYSMEM
+   flags |= TU_DEBUG_SYSMEM;
+#endif
+   tu_env.start_debug = tu_env.debug = flags;
 
    if (TU_DEBUG(STARTUP))
       mesa_logi("TU_DEBUG=0x%" PRIx64, tu_env.debug.load());

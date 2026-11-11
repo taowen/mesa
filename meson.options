@@ -214,6 +214,13 @@ option(
 )
 
 option(
+  'freedreno-force-sysmem',
+  type : 'boolean',
+  value : false,
+  description : 'Force Turnip rendering directly to system memory on all GPUs',
+)
+
+option(
   'amd-options',
   type : 'array',
   value : ['use-llvm'],

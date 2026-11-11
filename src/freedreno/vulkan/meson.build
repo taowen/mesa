@@ -102,6 +102,9 @@ libtu_includes = [
 tu_link_with = []
 tu_deps = []
 tu_flags = [sse2_args]
+if get_option('freedreno-force-sysmem')
+  tu_flags += '-DTU_FORCE_SYSMEM'
+endif
 
 tu_wsi = false
 
